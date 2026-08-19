@@ -1051,7 +1051,12 @@ func (m Model) renderViewedList() string {
 				Foreground(lipgloss.Color("240")).
 				Render(prefix+"● "+p)
 			if i == m.cursor {
-				line = styleSelected.Width(m.width).Render(prefix + "● " + p)
+			plain := prefix + "● " + p
+			padded := plain + strings.Repeat(" ", max(0, m.width-len([]rune(plain))))
+			if len([]rune(padded)) > m.width {
+				padded = string([]rune(padded)[:m.width])
+			}
+			line = styleSelected.Render(padded)
 			}
 			sb.WriteString(line + "\n")
 		}
@@ -1356,7 +1361,12 @@ func (m Model) renderList(width, height int) string {
 			line = padRight(line, width)
 
 			if r.itemIndex == cursor {
-				line = styleSelected.Width(width).Render(line)
+				plain := stripANSI(line)
+				padded := plain + strings.Repeat(" ", max(0, width-len([]rune(plain))))
+				if len([]rune(padded)) > width {
+					padded = string([]rune(padded)[:width])
+				}
+				line = styleSelected.Render(padded)
 			}
 		}
 
@@ -1394,20 +1404,24 @@ func (m Model) renderPreviewPane(width, height int) string {
 	styleClickedLine := lipgloss.NewStyle().
 		Background(lipgloss.Color("57")).
 		Foreground(lipgloss.Color("255")).
-		Bold(true)
+		Bold(true).
+		MaxWidth(width)
 
 	var sb strings.Builder
 	for i, line := range visible {
 		absoluteI := start + i
-		// highlight by visual row index — reliable regardless of line format
 		if m.previewClickedRow >= 0 && absoluteI == m.previewClickedRow {
-			line = styleClickedLine.Render(padRight(stripANSI(line), width))
-			sb.WriteString(line)
+			plain := stripANSI(line)
+			// pad to exact width, then cap — prevents background bleed
+			padded := plain + strings.Repeat(" ", max(0, width-len([]rune(plain))))
+			if len([]rune(padded)) > width {
+				padded = string([]rune(padded)[:width])
+			}
+			sb.WriteString(styleClickedLine.Render(padded))
 			sb.WriteByte('\n')
 			continue
 		}
-		visible2 := stripANSI(line)
-		if len(visible2) > width {
+		if len(stripANSI(line)) > width {
 			line = truncateANSI(line, width)
 		}
 		sb.WriteString(line)
