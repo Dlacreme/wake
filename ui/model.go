@@ -199,6 +199,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// clear status message on any keypress
+	m.statusMsg = ""
+
 	// note editor captures all keys except save/cancel
 	if m.mode == ModeNote {
 		return m.handleNoteKey(msg)
@@ -1065,11 +1068,6 @@ func (m Model) renderHeader() string {
 }
 
 func (m Model) renderFooter() string {
-	if m.statusMsg != "" {
-		msg := m.statusMsg
-		return styleFooter.Width(m.width).Render(msg)
-	}
-
 	var hints string
 	switch m.mode {
 	case ModeList:
@@ -1094,6 +1092,18 @@ func (m Model) renderFooter() string {
 			hints += " · ctrl-s publish"
 		}
 	}
+
+	if m.statusMsg != "" {
+		msg := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("214")).Bold(true).
+			Render(m.statusMsg + "  ")
+		// status on top, hints below
+		return lipgloss.JoinVertical(lipgloss.Left,
+			styleFooter.Width(m.width).Render(msg),
+			styleFooter.Width(m.width).Render(hints),
+		)
+	}
+
 	return styleFooter.Width(m.width).Render(hints)
 }
 
