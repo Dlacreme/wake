@@ -1074,7 +1074,7 @@ const helpText = `
   n          add / edit a note on current file
              (click a line in preview first to annotate that line)
   N          view all pending notes
-  P          publish notes as GitHub PR review  (--pr mode only)
+{{PR_PUBLISH}}
 
  ── Invocation ───────────────────────────────────────────
   wake                       local changes vs HEAD
@@ -1089,7 +1089,13 @@ const helpText = `
 `
 
 func (m Model) renderHelp() string {
-	lines := strings.Split(strings.TrimPrefix(helpText, "\n"), "\n")
+	text := strings.TrimPrefix(helpText, "\n")
+	if m.pr != nil {
+		text = strings.ReplaceAll(text, "{{PR_PUBLISH}}", "  P          publish notes as GitHub PR review")
+	} else {
+		text = strings.ReplaceAll(text, "{{PR_PUBLISH}}", "")
+	}
+	lines := strings.Split(text, "\n")
 	styleTitle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("99"))
 	styleSect := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33"))
 	styleDim := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
