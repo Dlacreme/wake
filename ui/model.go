@@ -418,20 +418,23 @@ func (m Model) handleMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 	listW := m.listWidth()
 	previewX := listW + 1 // preview starts after list + divider
 
-	if x < listW {
-		// click in list pane
-		return m.handleListClick(contentY)
-	} else if x >= previewX && m.layout != layoutHidden {
-		// click in preview pane
-		previewY := contentY
-		if m.layout == layoutBottom {
-			listH := usable * 40 / 100
-			if contentY < listH {
-				return m.handleListClick(contentY)
-			}
-			previewY = contentY - listH - 1
+	// zoomed or list-hidden: entire screen is preview
+	if m.zoomed || m.layout == layoutHidden {
+		return m.handlePreviewClick(contentY)
+	}
+
+	if m.layout == layoutBottom {
+		listH := usable * 40 / 100
+		if contentY < listH {
+			return m.handleListClick(contentY)
 		}
-		return m.handlePreviewClick(previewY)
+		return m.handlePreviewClick(contentY - listH - 1)
+	}
+
+	if x < listW {
+		return m.handleListClick(contentY)
+	} else if x >= previewX {
+		return m.handlePreviewClick(contentY)
 	}
 
 	return m, nil
