@@ -1420,10 +1420,13 @@ func (m Model) renderPreviewPane(width, height int) string {
 			sb.WriteByte('\n')
 			continue
 		}
-		if len(stripANSI(line)) > width {
+		if len([]rune(stripANSI(line))) > width {
 			line = truncateANSI(line, width)
 		}
-		sb.WriteString(line)
+		// always reset after each preview line — bat/delta leave open
+		// background sequences (green/red diff highlights) that bleed
+		// leftward into the list pane if not closed before the newline
+		sb.WriteString(line + "\033[0m")
 		sb.WriteByte('\n')
 	}
 
