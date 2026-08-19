@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -28,13 +29,13 @@ const (
 	ModeGrep            // grep results
 	ModePeek            // whole-repo fuzzy file list
 	ModePeekGrep        // grep results for whole repo
-	ModeNote            // note editor overlay
-	ModeNotesList       // all pending notes
-	ModeViewedList      // viewed files (V key)
+	ModeNote            // note editor (new thread first message)
+	ModeReply           // reply editor (add message to existing thread)
+	ModeNotesList       // all threads overview
+	ModeViewedList      // viewed files
 	ModeHelp            // help popup
 )
 
-// focusPane: which pane has keyboard focus
 type focusPane int
 
 const (
@@ -47,13 +48,13 @@ const (
 type itemsLoadedMsg struct{ items []git.Item }
 type previewReadyMsg struct {
 	content string
-	lines   []string // split lines for click hit-testing
+	lines   []string
 }
 type editorDoneMsg struct{}
 type errMsg struct{ err error }
 type prLoadedMsg struct {
 	pr       gh.PR
-	comments []gh.ReviewComment
+	threads  map[string]*gh.NoteThread
 	fullDiff string
 	files    []string
 }
@@ -65,25 +66,21 @@ type Model struct {
 	mode  Mode
 	focus focusPane
 
-	// list
 	items  []git.Item
 	cursor int
 	query  textinput.Model
 
-	// viewed: path → diffHash; session-only
 	viewed map[string]string
 
-	// preview
 	preview             string
-	previewLines        []string // raw lines, for click line mapping
-	previewScrollOffset int      // first visible line
-	previewClickedRow   int      // visual row last clicked (-1 = none)
-	previewClickedLine  int      // file line parsed from clicked row (0 = unknown)
+	previewLines        []string
+	previewScrollOffset int
+	previewClickedRow   int
+	previewClickedLine  int
 	layout              previewLayout
-	zoomed              bool // z key: full-screen preview (hides list)
+	zoomed              bool
 	full                bool
 
-	// peek
 	peekItems       []git.Item
 	peekCursor      int
 	peekQuery       textinput.Model
@@ -91,26 +88,23 @@ type Model struct {
 	savedListItems  []git.Item
 	savedMode       Mode
 
-	// dimensions
 	width  int
 	height int
 
-	// config
 	cfg   config.Config
 	root  string
 	since string
 
-	// PR
 	pr         *gh.PR
-	prComments []gh.ReviewComment
 	prFullDiff string
 	prLoading  bool
 
-	// notes
-	notes    map[string]gh.Note
-	noteTA   textarea.Model
-	notePath string
-	noteLine int // 0 = file-level
+	// threads: key = gh.ThreadKey(path, line)
+	threads   map[string]*gh.NoteThread
+	noteTA    textarea.Model
+	notePath  string
+	noteLine  int
+	replyKey  string // thread key being replied to
 
 	statusMsg string
 }
@@ -127,7 +121,7 @@ func New(root, since string, cfg config.Config, pr *gh.PR) Model {
 	pi.Prompt = ""
 
 	ta := textarea.New()
-	ta.Placeholder = "Write your note… (ctrl-s to save, esc to cancel)"
+	ta.Placeholder = "Write your message… (ctrl-s to save, esc to cancel)"
 	ta.ShowLineNumbers = false
 	ta.SetWidth(80)
 	ta.SetHeight(8)
@@ -136,7 +130,7 @@ func New(root, since string, cfg config.Config, pr *gh.PR) Model {
 		mode:              ModeList,
 		focus:             focusList,
 		viewed:            make(map[string]string),
-		notes:             make(map[string]gh.Note),
+		threads:           make(map[string]*gh.NoteThread),
 		query:             qi,
 		peekQuery:         pi,
 		noteTA:            ta,
@@ -187,9 +181,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pr != nil {
 			*m.pr = msg.pr
 		}
-		m.prComments = msg.comments
 		m.prFullDiff = msg.fullDiff
 		m.statusMsg = fmt.Sprintf("PR #%d: %s", msg.pr.Number, msg.pr.Title)
+		// merge GH threads (don't overwrite local ones)
+		for k, t := range msg.threads {
+			if existing, ok := m.threads[k]; ok {
+				// prepend GH messages before local ones
+				existing.Messages = append(t.Messages, existing.Messages...)
+				existing.DiffPos = t.DiffPos
+			} else {
+				m.threads[k] = t
+			}
+		}
 		items := prFilesToItems(msg.files, msg.fullDiff)
 		cachedChangedItems = items
 		m.items = items
@@ -201,7 +204,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "publish failed: " + msg.err.Error()
 		} else {
 			m.statusMsg = fmt.Sprintf("review published on PR #%d", m.pr.Number)
-			m.notes = make(map[string]gh.Note)
+			// clear local messages, keep GH ones
+			for _, t := range m.threads {
+				var ghMsgs []gh.Message
+				for _, msg := range t.Messages {
+					if msg.FromGH {
+						ghMsgs = append(ghMsgs, msg)
+					}
+				}
+				t.Messages = ghMsgs
+			}
 		}
 		return m, nil
 
@@ -230,12 +242,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // ── key handling ──────────────────────────────────────────────────────────────
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// overlays that capture all keys
 	if m.mode == ModeHelp {
 		m.mode = m.savedMode
 		return m, nil
 	}
-	if m.mode == ModeNote {
+	if m.mode == ModeNote || m.mode == ModeReply {
 		return m.handleNoteKey(msg)
 	}
 	if m.mode == ModeGrepInput {
@@ -247,7 +258,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	m.statusMsg = ""
 
-	// preview-focused: j/k scroll, h returns, n notes at clicked line
 	if m.focus == focusPreview {
 		switch {
 		case key.Matches(msg, keys.Quit):
@@ -263,11 +273,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case key.Matches(msg, keys.Note):
 			return m.handleNoteOpen()
+		case key.Matches(msg, keys.Reply):
+			return m.handleReplyOpen()
 		}
 		return m, nil
 	}
 
-	// list-focused: full key map
 	switch {
 	case key.Matches(msg, keys.Quit):
 		return m, tea.Quit
@@ -285,6 +296,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.previewScrollOffset = 0
 		}
 		return m, nil
+	case key.Matches(msg, keys.Zoom):
+		m.zoomed = !m.zoomed
+		if m.zoomed {
+			m.focus = focusPreview
+		} else {
+			m.focus = focusList
+		}
+		return m, nil
 	case key.Matches(msg, keys.Viewed):
 		if m.mode != ModeNotesList && m.mode != ModeViewedList {
 			return m.markViewed()
@@ -299,15 +318,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.prLoading = true
 		}
 		return m, m.reloadListCmd()
-	case key.Matches(msg, keys.Zoom):
-		m.zoomed = !m.zoomed
-		if m.zoomed {
-			m.focus = focusPreview
-		} else {
-			m.focus = focusList
-		}
-		return m, nil
-		return m, nil
 	case key.Matches(msg, keys.Grep):
 		return m.handleGrepOpen()
 	case key.Matches(msg, keys.FileList):
@@ -318,13 +328,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case key.Matches(msg, keys.Note):
 		return m.handleNoteOpen()
+	case key.Matches(msg, keys.Reply):
+		return m.handleReplyOpen()
 	case key.Matches(msg, keys.NotesList):
 		return m.handleNotesList()
 	case key.Matches(msg, keys.Publish):
-		if m.pr != nil && len(m.notes) > 0 {
-			return m, publishNotes(m.pr, m.notesSlice(), m.prFullDiff)
-		} else if m.pr != nil {
-			m.statusMsg = "no notes to publish"
+		if m.pr != nil {
+			if m.hasLocalThreads() {
+				return m, publishThreads(m.pr, m.threads, m.prFullDiff)
+			}
+			m.statusMsg = "no local notes to publish"
 		} else {
 			m.statusMsg = "not in PR mode (use --pr)"
 		}
@@ -403,26 +416,20 @@ func (m Model) handleMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
 		return m, nil
 	}
-
-	headerH := 1 // header is always 1 line
+	headerH := 1
 	footerH := m.footerHeight()
 	usable := m.height - headerH - footerH
-
 	x, y := msg.X, msg.Y
-	contentY := y - headerH // row within the content area
-
+	contentY := y - headerH
 	if contentY < 0 || contentY >= usable {
 		return m, nil
 	}
-
 	listW := m.listWidth()
-	previewX := listW + 1 // preview starts after list + divider
+	previewX := listW + 1
 
-	// zoomed or list-hidden: entire screen is preview
 	if m.zoomed || m.layout == layoutHidden {
 		return m.handlePreviewClick(contentY)
 	}
-
 	if m.layout == layoutBottom {
 		listH := usable * 40 / 100
 		if contentY < listH {
@@ -430,13 +437,11 @@ func (m Model) handleMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 		}
 		return m.handlePreviewClick(contentY - listH - 1)
 	}
-
 	if x < listW {
 		return m.handleListClick(contentY)
 	} else if x >= previewX {
 		return m.handlePreviewClick(contentY)
 	}
-
 	return m, nil
 }
 
@@ -445,11 +450,8 @@ func (m Model) handleListClick(row int) (Model, tea.Cmd) {
 	if len(items) == 0 {
 		return m, nil
 	}
-
 	rows := buildTreeRows(items)
 	cursor := m.activeCursor()
-
-	// find which visual row the current cursor is on (for scroll offset)
 	cursorRow := 0
 	for ri, r := range rows {
 		if r.kind == 1 && r.itemIndex == cursor {
@@ -459,17 +461,13 @@ func (m Model) handleListClick(row int) (Model, tea.Cmd) {
 	}
 	startR, _ := scrollWindow(cursorRow, len(rows), m.listVisibleHeight())
 	targetRow := startR + row
-
 	if targetRow < 0 || targetRow >= len(rows) {
 		return m, nil
 	}
-
 	r := rows[targetRow]
 	if r.kind != 1 {
-		return m, nil // clicked a dir header
+		return m, nil
 	}
-
-	// focus list, move cursor
 	m.focus = focusList
 	isPeek := m.mode == ModePeek || m.mode == ModePeekGrep
 	if isPeek {
@@ -482,88 +480,68 @@ func (m Model) handleListClick(row int) (Model, tea.Cmd) {
 
 func (m Model) handlePreviewClick(row int) (Model, tea.Cmd) {
 	m.focus = focusPreview
-
-	// absolute index into previewLines
 	lineIndex := m.previewScrollOffset + row
 	if lineIndex < 0 || lineIndex >= len(m.previewLines) {
 		return m, nil
 	}
-
-	// store visual row for reliable highlighting
+	// skip injected thread block lines (sentinel prefix)
+	if strings.HasPrefix(m.previewLines[lineIndex], threadSentinel) {
+		return m, nil
+	}
 	m.previewClickedRow = lineIndex
-
-	// try to parse a file line number for annotation
 	fileLine := extractLineNumber(m.previewLines[lineIndex])
 	m.previewClickedLine = fileLine
-
 	if fileLine > 0 {
-		m.statusMsg = fmt.Sprintf("line %d selected — press n to annotate", fileLine)
+		m.statusMsg = fmt.Sprintf("line %d — n to annotate · R to reply", fileLine)
 	} else {
-		m.statusMsg = "line selected — press n to annotate"
+		m.statusMsg = "line selected — n to annotate · R to reply"
 	}
-
 	return m, nil
 }
 
-// extractLineNumber tries to parse a file line number from a rendered preview line.
-// Handles bat format "  123 │ ..." and plain "  123  ..." and diff "@@ -N +N @@".
-func extractLineNumber(line string) int {
-	s := stripANSI(line)
-	s = strings.TrimLeft(s, " ")
-
-	// diff hunk header: @@ -old +new @@
-	if strings.HasPrefix(s, "@@") {
-		var old, new_ int
-		fmt.Sscanf(s, "@@ -%d", &old)
-		fmt.Sscanf(s, "@@ -%*d,%*d +%d", &new_)
-		if new_ == 0 {
-			fmt.Sscanf(s, "@@ -%*d +%d", &new_)
-		}
-		return new_
-	}
-
-	// bat/plain: "NNN │ ..." or "NNN  ..."
-	// find first run of digits at start
-	i := 0
-	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
-		i++
-	}
-	if i > 0 && i < len(s) {
-		n := 0
-		fmt.Sscanf(s[:i], "%d", &n)
-		if n > 0 {
-			return n
-		}
-	}
-
-	return 0
-}
-
-// ── note handling ─────────────────────────────────────────────────────────────
+// ── note / reply handling ─────────────────────────────────────────────────────
 
 func (m Model) handleNoteOpen() (Model, tea.Cmd) {
 	item := m.selectedItem()
 	if item == nil {
 		return m, nil
 	}
-	m.notePath = item.Path
-	// use clicked preview line if available (regardless of focus)
-	if m.previewClickedRow >= 0 && m.previewClickedLine > 0 {
-		m.noteLine = m.previewClickedLine
-	} else if m.previewClickedRow >= 0 {
-		// clicked but line number unknown — use row as approximation
-		m.noteLine = m.previewClickedRow + 1
-	} else {
-		m.noteLine = item.Line
+	path := item.Path
+	line := m.effectiveLine(item)
+	key := gh.ThreadKey(path, line)
+
+	// if thread exists and visible → toggle visibility
+	if t, ok := m.threads[key]; ok && len(t.Messages) > 0 {
+		t.Visible = !t.Visible
+		return m, m.refreshPreviewCmd()
 	}
-	if existing, ok := m.notes[item.Path]; ok {
-		m.noteTA.SetValue(existing.Body)
-	} else {
-		m.noteTA.SetValue("")
-	}
+
+	// no thread → open editor to create first message
+	m.notePath = path
+	m.noteLine = line
+	m.noteTA.SetValue("")
 	m.noteTA.Focus()
 	m.savedMode = m.mode
 	m.mode = ModeNote
+	return m, textarea.Blink
+}
+
+func (m Model) handleReplyOpen() (Model, tea.Cmd) {
+	item := m.selectedItem()
+	if item == nil {
+		return m, nil
+	}
+	path := item.Path
+	line := m.effectiveLine(item)
+	key := gh.ThreadKey(path, line)
+
+	m.replyKey = key
+	m.notePath = path
+	m.noteLine = line
+	m.noteTA.SetValue("")
+	m.noteTA.Focus()
+	m.savedMode = m.mode
+	m.mode = ModeReply
 	return m, textarea.Blink
 }
 
@@ -571,20 +549,32 @@ func (m Model) handleNoteKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, keys.Submit):
 		body := strings.TrimSpace(m.noteTA.Value())
-		if body != "" {
-			m.notes[m.notePath] = gh.Note{
-				Path: m.notePath,
-				Line: m.noteLine,
-				Body: body,
-			}
-			m.statusMsg = fmt.Sprintf("note saved: %s", m.notePath)
-		} else {
-			delete(m.notes, m.notePath)
-			m.statusMsg = fmt.Sprintf("note removed: %s", m.notePath)
-		}
-		m.mode = m.savedMode
 		m.noteTA.Blur()
+		m.mode = m.savedMode
+		if body == "" {
+			return m, nil
+		}
+		msg := gh.Message{
+			Author:    "you",
+			Body:      body,
+			CreatedAt: time.Now(),
+			FromGH:    false,
+		}
+		tkey := gh.ThreadKey(m.notePath, m.noteLine)
+		if t, ok := m.threads[tkey]; ok {
+			t.Messages = append(t.Messages, msg)
+		} else {
+			m.threads[tkey] = &gh.NoteThread{
+				Path:    m.notePath,
+				Line:    m.noteLine,
+				Visible: true,
+				Messages: []gh.Message{msg},
+			}
+		}
+		m.threads[tkey].Visible = true
+		m.statusMsg = fmt.Sprintf("note added: %s", m.notePath)
 		return m, m.refreshPreviewCmd()
+
 	case key.Matches(msg, keys.Esc):
 		m.mode = m.savedMode
 		m.noteTA.Blur()
@@ -593,6 +583,18 @@ func (m Model) handleNoteKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.noteTA, cmd = m.noteTA.Update(msg)
 	return m, cmd
+}
+
+// effectiveLine returns the line to use for a note:
+// previewClickedLine if a preview line was clicked, else item.Line.
+func (m Model) effectiveLine(item *git.Item) int {
+	if m.previewClickedRow >= 0 && m.previewClickedLine > 0 {
+		return m.previewClickedLine
+	}
+	if m.previewClickedRow >= 0 {
+		return m.previewClickedRow + 1
+	}
+	return item.Line
 }
 
 func (m Model) handleNotesList() (Model, tea.Cmd) {
@@ -605,15 +607,26 @@ func (m Model) handleNotesList() (Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) notesSlice() []gh.Note {
-	out := make([]gh.Note, 0, len(m.notes))
-	for _, n := range m.notes {
-		out = append(out, n)
+func (m Model) hasLocalThreads() bool {
+	for _, t := range m.threads {
+		if t.HasLocal() {
+			return true
+		}
 	}
-	return out
+	return false
 }
 
-// ── viewed list ───────────────────────────────────────────────────────────────
+func (m Model) threadCount() int {
+	n := 0
+	for _, t := range m.threads {
+		if len(t.Messages) > 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// ── viewed ────────────────────────────────────────────────────────────────────
 
 func (m Model) handleViewedList() (Model, tea.Cmd) {
 	if m.mode == ModeViewedList {
@@ -625,12 +638,18 @@ func (m Model) handleViewedList() (Model, tea.Cmd) {
 	return m, nil
 }
 
-// unviewItem removes a path from the viewed map so it reappears in the list.
 func (m Model) unviewItem(path string) (Model, tea.Cmd) {
 	delete(m.viewed, path)
 	m.statusMsg = fmt.Sprintf("unviewed: %s", path)
-	// reload list so it reappears
 	return m, m.reloadListCmd()
+}
+
+func (m Model) viewedPaths() []string {
+	paths := make([]string, 0, len(m.viewed))
+	for p := range m.viewed {
+		paths = append(paths, p)
+	}
+	return paths
 }
 
 // ── navigation ────────────────────────────────────────────────────────────────
@@ -642,7 +661,6 @@ func (m Model) moveCursor(delta int) (Model, tea.Cmd) {
 	} else {
 		m.cursor = clamp(m.cursor+delta, 0, len(m.items)-1)
 	}
-	// clear preview click state when file changes
 	m.previewClickedRow = -1
 	m.previewClickedLine = 0
 	m.previewScrollOffset = 0
@@ -673,7 +691,6 @@ func (m Model) handleEsc() (Model, tea.Cmd) {
 }
 
 func (m Model) handleEnter() (Model, tea.Cmd) {
-	// in viewed list, enter = unview
 	if m.mode == ModeViewedList {
 		paths := m.viewedPaths()
 		if m.cursor >= 0 && m.cursor < len(paths) {
@@ -707,14 +724,6 @@ func (m Model) markViewed() (Model, tea.Cmd) {
 	m.clampCursor()
 	m.statusMsg = fmt.Sprintf("marked viewed: %s", item.Path)
 	return m, m.refreshPreviewCmd()
-}
-
-func (m Model) viewedPaths() []string {
-	paths := make([]string, 0, len(m.viewed))
-	for p := range m.viewed {
-		paths = append(paths, p)
-	}
-	return paths
 }
 
 func (m Model) handleGrepOpen() (Model, tea.Cmd) {
@@ -859,7 +868,7 @@ func loadPR(pr *gh.PR) tea.Cmd {
 		if err := gh.Fetch(pr); err != nil {
 			return errMsg{err}
 		}
-		comments, err := gh.Comments(*pr)
+		threads, err := gh.Comments(*pr)
 		if err != nil {
 			return errMsg{err}
 		}
@@ -871,7 +880,7 @@ func loadPR(pr *gh.PR) tea.Cmd {
 		if err != nil {
 			return errMsg{err}
 		}
-		return prLoadedMsg{pr: *pr, comments: comments, fullDiff: fullDiff, files: files}
+		return prLoadedMsg{pr: *pr, threads: threads, fullDiff: fullDiff, files: files}
 	}
 }
 
@@ -895,9 +904,9 @@ func prFilesToItems(files []string, fullDiff string) []git.Item {
 	return items
 }
 
-func publishNotes(pr *gh.PR, notes []gh.Note, fullDiff string) tea.Cmd {
+func publishThreads(pr *gh.PR, threads map[string]*gh.NoteThread, fullDiff string) tea.Cmd {
 	return func() tea.Msg {
-		err := gh.Publish(*pr, notes, fullDiff)
+		err := gh.Publish(*pr, threads, fullDiff)
 		return publishDoneMsg{err: err}
 	}
 }
@@ -945,6 +954,12 @@ func openEditor(root, since string, item git.Item, cfg config.Config) tea.Cmd {
 	return tea.ExecProcess(c, func(err error) tea.Msg { return editorDoneMsg{} })
 }
 
+// ── preview with inline threads ───────────────────────────────────────────────
+
+// threadSentinel prefixes every injected thread line so we can skip them
+// during click hit-testing and line-number extraction.
+const threadSentinel = "\x00thread\x00"
+
 func (m Model) refreshPreviewCmd() tea.Cmd {
 	item := m.selectedItem()
 	if item == nil {
@@ -955,17 +970,14 @@ func (m Model) refreshPreviewCmd() tea.Cmd {
 	full := m.full
 	w := m.previewWidth()
 	it := *item
-	comments := m.prComments
 	prFullDiff := m.prFullDiff
-	notes := m.notes
 	isPR := m.pr != nil
+	threads := m.threads
 	return func() tea.Msg {
 		var content string
 		if isPR && prFullDiff != "" {
 			if full {
-				// full-file mode: read actual file content
 				content = renderPreview(root, since, it, true, w)
-				// fall back to PR diff if file doesn't exist locally
 				if content == "" {
 					fileDiff := gh.FileDiff(prFullDiff, it.Path)
 					content = renderDiffText(fileDiff, w)
@@ -979,10 +991,138 @@ func (m Model) refreshPreviewCmd() tea.Cmd {
 		} else {
 			content = renderPreview(root, since, it, full, w)
 		}
-		content = appendComments(content, it.Path, comments)
-		content = appendNote(content, it.Path, notes)
+		// inject inline thread blocks
 		lines := strings.Split(content, "\n")
-		return previewReadyMsg{content: content, lines: lines}
+		lines = injectThreads(lines, it.Path, threads, w)
+		return previewReadyMsg{
+			content: strings.Join(lines, "\n"),
+			lines:   lines,
+		}
+	}
+}
+
+// injectThreads inserts thread blocks after the line they're anchored to.
+// File-level threads (Line=0) are prepended at the top.
+func injectThreads(lines []string, path string, threads map[string]*gh.NoteThread, width int) []string {
+	// collect threads for this file
+	var fileLevelThreads []*gh.NoteThread
+	lineThreads := make(map[int]*gh.NoteThread)
+	for _, t := range threads {
+		if t.Path != path || !t.Visible || len(t.Messages) == 0 {
+			continue
+		}
+		if t.Line == 0 {
+			fileLevelThreads = append(fileLevelThreads, t)
+		} else {
+			lineThreads[t.Line] = t
+		}
+	}
+
+	var out []string
+
+	// file-level threads at top
+	for _, t := range fileLevelThreads {
+		out = append(out, renderThreadBlock(t, width)...)
+	}
+
+	// track current file line as we scan (counting non-deleted diff lines)
+	currentLine := 0
+	for _, line := range lines {
+		plain := stripANSI(line)
+		// track line numbers from diff output
+		if strings.HasPrefix(plain, "@@") {
+			// extract starting line from @@ -old +new @@
+			var newStart int
+			fmt.Sscanf(plain, "@@ -%*d,%*d +%d", &newStart)
+			if newStart == 0 {
+				fmt.Sscanf(plain, "@@ -%*d +%d", &newStart)
+			}
+			if newStart > 0 {
+				currentLine = newStart - 1 // will be incremented below
+			}
+		}
+		// context and added lines advance the file line counter
+		if !strings.HasPrefix(plain, "-") && !strings.HasPrefix(plain, "\\") &&
+			!strings.HasPrefix(plain, "diff ") && !strings.HasPrefix(plain, "index ") &&
+			!strings.HasPrefix(plain, "---") && !strings.HasPrefix(plain, "+++") &&
+			!strings.HasPrefix(plain, "@@") && plain != "" {
+			currentLine++
+		}
+
+		out = append(out, line)
+
+		// inject thread after this line if one is anchored here
+		if t, ok := lineThreads[currentLine]; ok {
+			out = append(out, renderThreadBlock(t, width)...)
+		}
+	}
+	return out
+}
+
+func renderThreadBlock(t *gh.NoteThread, width int) []string {
+	styleBox := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("252")).
+		Background(lipgloss.Color("236"))
+	styleAuthorLocal := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("99")).Bold(true)
+	styleAuthorGH := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("33")).Bold(true)
+	styleDim := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("240"))
+	styleBody := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("252"))
+	styleSep := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("240"))
+
+	boxW := width - 2
+	if boxW < 10 {
+		boxW = 10
+	}
+
+	var lines []string
+	top := threadSentinel + styleSep.Render("  ┌" + strings.Repeat("─", boxW-2) + "┐")
+	lines = append(lines, top)
+
+	for i, msg := range t.Messages {
+		authorStyle := styleAuthorGH
+		if !msg.FromGH {
+			authorStyle = styleAuthorLocal
+		}
+		author := authorStyle.Render(msg.Author)
+		age := styleDim.Render(formatAge(msg.CreatedAt))
+		header := threadSentinel + styleBox.Render(fmt.Sprintf("  │ %s %s", author, age))
+		lines = append(lines, header)
+
+		for _, bodyLine := range strings.Split(msg.Body, "\n") {
+			rendered := threadSentinel + styleBox.Render("  │ "+styleBody.Render(truncate(bodyLine, boxW-4)))
+			lines = append(lines, rendered)
+		}
+
+		if i < len(t.Messages)-1 {
+			sep := threadSentinel + styleSep.Render("  ├" + strings.Repeat("─", boxW-2) + "┤")
+			lines = append(lines, sep)
+		}
+	}
+
+	bottom := threadSentinel + styleSep.Render("  └" + strings.Repeat("─", boxW-2) + "┘")
+	lines = append(lines, bottom)
+	return lines
+}
+
+func formatAge(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
 }
 
@@ -995,7 +1135,7 @@ func (m Model) View() string {
 	if m.mode == ModeHelp {
 		return m.renderHelp()
 	}
-	if m.mode == ModeNote {
+	if m.mode == ModeNote || m.mode == ModeReply {
 		return m.renderNoteEditor()
 	}
 	if m.mode == ModeNotesList {
@@ -1012,7 +1152,6 @@ func (m Model) View() string {
 		usable = 1
 	}
 
-	// z zoomed: full-screen preview
 	if m.zoomed {
 		prev := m.renderPreviewPane(m.width, usable)
 		return lipgloss.JoinVertical(lipgloss.Left, header, prev, footer)
@@ -1029,52 +1168,106 @@ func (m Model) View() string {
 	return ""
 }
 
-// ── viewed list overlay ───────────────────────────────────────────────────────
-
-func (m Model) renderViewedList() string {
-	header := m.renderHeader()
-	footer := styleFooter.Width(m.width).Render("enter unview · esc back")
-
-	usable := m.height - lipgloss.Height(header) - lipgloss.Height(footer)
-
-	paths := m.viewedPaths()
-
-	var sb strings.Builder
-	if len(paths) == 0 {
-		sb.WriteString(lipgloss.NewStyle().
-			Foreground(lipgloss.Color("240")).
-			Render("  no viewed files"))
-	} else {
-		for i, p := range paths {
-			prefix := "  "
-			line := lipgloss.NewStyle().
-				Foreground(lipgloss.Color("240")).
-				Render(prefix+"● "+p)
-			if i == m.cursor {
-			plain := prefix + "● " + p
-			padded := plain + strings.Repeat(" ", max(0, m.width-len([]rune(plain))))
-			if len([]rune(padded)) > m.width {
-				padded = string([]rune(padded)[:m.width])
-			}
-			line = styleSelected.Render(padded)
-			}
-			sb.WriteString(line + "\n")
-		}
-	}
-
-	content := lipgloss.NewStyle().
-		Width(m.width).Height(usable).
-		Render(sb.String())
-
-	return lipgloss.JoinVertical(lipgloss.Left, header, content, footer)
-}
-
-// ── help popup ────────────────────────────────────────────────────────────────
+// ── overlays ──────────────────────────────────────────────────────────────────
 
 var styleOverlay = lipgloss.NewStyle().
 	Border(lipgloss.RoundedBorder()).
 	BorderForeground(lipgloss.Color("99")).
 	Padding(1, 2)
+
+func (m Model) renderNoteEditor() string {
+	title := fmt.Sprintf(" note: %s ", m.notePath)
+	if m.noteLine > 0 {
+		title = fmt.Sprintf(" note: %s:%d ", m.notePath, m.noteLine)
+	}
+	if m.mode == ModeReply {
+		title = fmt.Sprintf(" reply: %s:%d ", m.notePath, m.noteLine)
+	}
+	hint := styleFooter.Render("ctrl-s save · esc cancel")
+	box := styleOverlay.Render(
+		lipgloss.JoinVertical(lipgloss.Left,
+			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("99")).Render(title),
+			"",
+			m.noteTA.View(),
+			"",
+			hint,
+		),
+	)
+	return centreBox(box, m.width, m.height)
+}
+
+func (m Model) renderNotesList() string {
+	header := m.renderHeader()
+	hintStr := "n toggle · R reply · esc back"
+	if m.pr != nil {
+		hintStr += " · P publish"
+	}
+	footer := styleFooter.Width(m.width).Render(hintStr)
+	usable := m.height - lipgloss.Height(header) - lipgloss.Height(footer)
+
+	styleTitle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("99"))
+	styleAuthor := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	styleDim := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+
+	var sb strings.Builder
+	if m.threadCount() == 0 {
+		sb.WriteString(styleDim.Render("  no threads yet"))
+	} else {
+		for key, t := range m.threads {
+			if len(t.Messages) == 0 {
+				continue
+			}
+			loc := t.Path
+			if t.Line > 0 {
+				loc = fmt.Sprintf("%s:%d", t.Path, t.Line)
+			}
+			sb.WriteString(styleTitle.Render(fmt.Sprintf("  ● %s", loc)))
+			if !t.Visible {
+				sb.WriteString(styleDim.Render(" (hidden)"))
+			}
+			sb.WriteByte('\n')
+			for _, msg := range t.Messages {
+				author := styleAuthor.Render(msg.Author)
+				sb.WriteString(fmt.Sprintf("    %s: %s\n", author, truncate(msg.Body, m.width-12)))
+			}
+			sb.WriteByte('\n')
+			_ = key
+		}
+	}
+	content := lipgloss.NewStyle().Width(m.width).Height(usable).Render(sb.String())
+	return lipgloss.JoinVertical(lipgloss.Left, header, content, footer)
+}
+
+func (m Model) renderViewedList() string {
+	header := m.renderHeader()
+	footer := styleFooter.Width(m.width).Render("enter unview · esc back")
+	usable := m.height - lipgloss.Height(header) - lipgloss.Height(footer)
+	paths := m.viewedPaths()
+
+	var sb strings.Builder
+	styleDim := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	if len(paths) == 0 {
+		sb.WriteString(styleDim.Render("  no viewed files"))
+	} else {
+		for i, p := range paths {
+			prefix := "  "
+			line := styleDim.Render(prefix + "● " + p)
+			if i == m.cursor {
+				plain := prefix + "● " + p
+				padded := plain + strings.Repeat(" ", max(0, m.width-len([]rune(plain))))
+				if len([]rune(padded)) > m.width {
+					padded = string([]rune(padded)[:m.width])
+				}
+				line = styleSelected.Render(padded) + "\033[0m"
+			}
+			sb.WriteString(line + "\n")
+		}
+	}
+	content := lipgloss.NewStyle().Width(m.width).Height(usable).Render(sb.String())
+	return lipgloss.JoinVertical(lipgloss.Left, header, content, footer)
+}
+
+// ── help popup ────────────────────────────────────────────────────────────────
 
 const helpText = `
  wake — review a changeset you didn't write
@@ -1088,11 +1281,12 @@ const helpText = `
  ── Panes ────────────────────────────────────────────────
   l          focus preview pane (j/k to scroll)
   h / esc    focus back to file list
-  click      click file in list to select · click line in preview to select it
+  z          zoom preview full-screen (toggle)
+  click      click file in list to select
+             click line in preview to select it for annotation
 
  ── View ─────────────────────────────────────────────────
   t          toggle diff / whole-file view
-  z          zoom preview full-screen (toggle)
 
  ── Search ───────────────────────────────────────────────
   /          grep changed files  (enter to search, esc cancel)
@@ -1103,11 +1297,10 @@ const helpText = `
  ── Review ───────────────────────────────────────────────
   v          mark file viewed — hides it until its diff changes
   V          show viewed files (enter to unview)
-  n          add / edit a note on current file
-             (click a line in preview first to annotate that line)
-  N          view all pending notes
+  n          new thread on current file / toggle thread visibility
+  R          reply to thread at selected line
+  N          view all threads
 {{PR_PUBLISH}}
-
  ── Invocation ───────────────────────────────────────────
   wake                       local changes vs HEAD
   wake --since main          everything on this branch
@@ -1115,7 +1308,7 @@ const helpText = `
   wake --pr <url>            review by full GitHub URL
 
  ── Config  ~/.config/wake/config.toml or .wake.toml ─────
-  editor, preview, preview_width, sort, exclude, since
+  editor, preview, preview_width, sort, layout, exclude
 
  press any key to close
 `
@@ -1123,7 +1316,7 @@ const helpText = `
 func (m Model) renderHelp() string {
 	text := strings.TrimPrefix(helpText, "\n")
 	if m.pr != nil {
-		text = strings.ReplaceAll(text, "{{PR_PUBLISH}}", "  P          publish notes as GitHub PR review")
+		text = strings.ReplaceAll(text, "{{PR_PUBLISH}}", "  P          publish threads as GitHub PR review\n")
 	} else {
 		text = strings.ReplaceAll(text, "{{PR_PUBLISH}}", "")
 	}
@@ -1155,98 +1348,8 @@ func (m Model) renderHelp() string {
 			rendered = append(rendered, styleNormal.Render(line))
 		}
 	}
-
-	content := strings.Join(rendered, "\n")
-	box := styleOverlay.Render(content)
-	bw := lipgloss.Width(box)
-	bh := lipgloss.Height(box)
-	padL := (m.width - bw) / 2
-	padT := (m.height - bh) / 2
-	if padL < 0 {
-		padL = 0
-	}
-	if padT < 0 {
-		padT = 0
-	}
-	var sb strings.Builder
-	sb.WriteString(strings.Repeat("\n", padT))
-	left := strings.Repeat(" ", padL)
-	for _, line := range strings.Split(box, "\n") {
-		sb.WriteString(left + line + "\n")
-	}
-	return sb.String()
-}
-
-// ── note editor overlay ───────────────────────────────────────────────────────
-
-func (m Model) renderNoteEditor() string {
-	title := fmt.Sprintf(" note: %s ", m.notePath)
-	if m.noteLine > 0 {
-		title = fmt.Sprintf(" note: %s:%d ", m.notePath, m.noteLine)
-	}
-	hint := styleFooter.Render("ctrl-s save · esc cancel")
-	box := styleOverlay.Render(
-		lipgloss.JoinVertical(lipgloss.Left,
-			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("99")).Render(title),
-			"",
-			m.noteTA.View(),
-			"",
-			hint,
-		),
-	)
-	bw := lipgloss.Width(box)
-	bh := lipgloss.Height(box)
-	padL := (m.width - bw) / 2
-	padT := (m.height - bh) / 2
-	if padL < 0 {
-		padL = 0
-	}
-	if padT < 0 {
-		padT = 0
-	}
-	var sb strings.Builder
-	sb.WriteString(strings.Repeat("\n", padT))
-	left := strings.Repeat(" ", padL)
-	for _, line := range strings.Split(box, "\n") {
-		sb.WriteString(left + line + "\n")
-	}
-	return sb.String()
-}
-
-// ── notes list overlay ────────────────────────────────────────────────────────
-
-func (m Model) renderNotesList() string {
-	header := m.renderHeader()
-	hintStr := "n edit · esc back"
-	if m.pr != nil {
-		hintStr += " · P publish"
-	}
-	footer := styleFooter.Width(m.width).Render(hintStr)
-	usable := m.height - lipgloss.Height(header) - lipgloss.Height(footer)
-
-	var sb strings.Builder
-	if len(m.notes) == 0 {
-		sb.WriteString(lipgloss.NewStyle().
-			Foreground(lipgloss.Color("240")).
-			Render("  no notes yet — press n on any file"))
-	} else {
-		for path, note := range m.notes {
-			sb.WriteString(lipgloss.NewStyle().Bold(true).
-				Foreground(lipgloss.Color("99")).Render("  ● " + path))
-			if note.Line > 0 {
-				sb.WriteString(lipgloss.NewStyle().
-					Foreground(lipgloss.Color("240")).
-					Render(fmt.Sprintf(":%d", note.Line)))
-			}
-			sb.WriteByte('\n')
-			for _, line := range strings.Split(note.Body, "\n") {
-				sb.WriteString("    " + line + "\n")
-			}
-			sb.WriteByte('\n')
-		}
-	}
-	content := lipgloss.NewStyle().Width(m.width).Height(usable).Render(sb.String())
-	return lipgloss.JoinVertical(lipgloss.Left, header, content, footer)
+	box := styleOverlay.Render(strings.Join(rendered, "\n"))
+	return centreBox(box, m.width, m.height)
 }
 
 // ── list pane ─────────────────────────────────────────────────────────────────
@@ -1259,22 +1362,19 @@ var (
 	styleStatusR  = lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Bold(true)
 	styleStatusG  = lipgloss.NewStyle().Foreground(lipgloss.Color("165")).Bold(true)
 	styleStatusP  = lipgloss.NewStyle().Foreground(lipgloss.Color("44")).Bold(true)
-	styleNote     = lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Bold(true)
+	styleThread   = lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Bold(true)
 )
 
 func (m Model) renderSideBySide(header, footer string, usable int) string {
 	listW := m.listWidth()
 	prevW := m.width - listW - 1
-
 	divColor := lipgloss.Color("240")
 	if m.focus == focusPreview {
 		divColor = lipgloss.Color("99")
 	}
 	divStyle := lipgloss.NewStyle().Width(1).Height(usable).Foreground(divColor)
-
 	list := m.renderList(listW, usable)
 	prev := m.renderPreviewPane(prevW, usable)
-
 	row := lipgloss.JoinHorizontal(lipgloss.Top, list, divStyle.Render("│"), prev)
 	return lipgloss.JoinVertical(lipgloss.Left, header, row, footer)
 }
@@ -1305,14 +1405,11 @@ func (m Model) renderList(width, height int) string {
 		if m.prLoading {
 			msg = "  loading PR…"
 		}
-		return lipgloss.NewStyle().
-			Width(width).Height(height).
-			Foreground(lipgloss.Color("240")).
-			Render(msg)
+		return lipgloss.NewStyle().Width(width).Height(height).
+			Foreground(lipgloss.Color("240")).Render(msg)
 	}
 
 	rows := buildTreeRows(items)
-
 	cursorRow := 0
 	for ri, r := range rows {
 		if r.kind == 1 && r.itemIndex == cursor {
@@ -1320,18 +1417,13 @@ func (m Model) renderList(width, height int) string {
 			break
 		}
 	}
-
 	startR, endR := scrollWindow(cursorRow, len(rows), height)
-
 	styleDirHeader := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	styleFocused := lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true)
-	_ = styleFocused
 
 	var sb strings.Builder
 	for ri := startR; ri < endR; ri++ {
 		r := rows[ri]
 		var line string
-
 		if r.kind == 0 {
 			line = styleDirHeader.Render("  "+r.dir+"/") + "\033[0m"
 			line = padRight(line, width)
@@ -1339,9 +1431,14 @@ func (m Model) renderList(width, height int) string {
 			it := items[r.itemIndex]
 			st := statusStyle(it.Status).Render(it.Status)
 
-			noteMark := ""
-			if _, hasNote := m.notes[it.Path]; hasNote {
-				noteMark = styleNote.Render("●") + " "
+			// thread marker
+			threadMark := ""
+			filePath := it.Path
+			for _, t := range m.threads {
+				if t.Path == filePath && len(t.Messages) > 0 {
+					threadMark = styleThread.Render("●") + " "
+					break
+				}
 			}
 
 			var label string
@@ -1356,7 +1453,7 @@ func (m Model) renderList(width, height int) string {
 				indent = "    "
 			}
 
-			line = fmt.Sprintf("%s%s  %s%s", indent, st, noteMark, label)
+			line = fmt.Sprintf("%s%s  %s%s", indent, st, threadMark, label)
 			line = truncate(line, width)
 			line = padRight(line, width)
 
@@ -1369,7 +1466,6 @@ func (m Model) renderList(width, height int) string {
 				line = styleSelected.Render(padded) + "\033[0m"
 			}
 		}
-
 		sb.WriteString(line)
 		sb.WriteByte('\n')
 	}
@@ -1391,7 +1487,6 @@ func (m Model) renderPreviewPane(width, height int) string {
 		lines = strings.Split(m.preview, "\n")
 	}
 
-	// apply scroll offset
 	start := m.previewScrollOffset
 	if start > len(lines) {
 		start = len(lines)
@@ -1407,11 +1502,29 @@ func (m Model) renderPreviewPane(width, height int) string {
 		Bold(true).
 		MaxWidth(width)
 
+	styleThreadLine := lipgloss.NewStyle().
+		Background(lipgloss.Color("236")).
+		Foreground(lipgloss.Color("252"))
+
 	var sb strings.Builder
 	for i, line := range visible {
 		absoluteI := start + i
+		isThread := strings.HasPrefix(line, threadSentinel)
+		displayLine := strings.TrimPrefix(line, threadSentinel)
+
+		if isThread {
+			plain := stripANSI(displayLine)
+			padded := plain + strings.Repeat(" ", max(0, width-len([]rune(plain))))
+			if len([]rune(padded)) > width {
+				padded = string([]rune(padded)[:width])
+			}
+			sb.WriteString(styleThreadLine.Render(padded) + "\033[0m")
+			sb.WriteByte('\n')
+			continue
+		}
+
 		if m.previewClickedRow >= 0 && absoluteI == m.previewClickedRow {
-			plain := stripANSI(line)
+			plain := stripANSI(displayLine)
 			padded := plain + strings.Repeat(" ", max(0, width-len([]rune(plain))))
 			if len([]rune(padded)) > width {
 				padded = string([]rune(padded)[:width])
@@ -1420,13 +1533,11 @@ func (m Model) renderPreviewPane(width, height int) string {
 			sb.WriteByte('\n')
 			continue
 		}
-		if len([]rune(stripANSI(line))) > width {
-			line = truncateANSI(line, width)
+
+		if len([]rune(stripANSI(displayLine))) > width {
+			displayLine = truncateANSI(displayLine, width)
 		}
-		// always reset after each preview line — bat/delta leave open
-		// background sequences (green/red diff highlights) that bleed
-		// leftward into the list pane if not closed before the newline
-		sb.WriteString(line + "\033[0m")
+		sb.WriteString(displayLine + "\033[0m")
 		sb.WriteByte('\n')
 	}
 
@@ -1439,50 +1550,9 @@ func (m Model) renderPreviewPane(width, height int) string {
 	return rendered
 }
 
-func appendComments(preview, path string, comments []gh.ReviewComment) string {
-	var relevant []gh.ReviewComment
-	for _, c := range comments {
-		if c.Path == path {
-			relevant = append(relevant, c)
-		}
-	}
-	if len(relevant) == 0 {
-		return preview
-	}
-	var sb strings.Builder
-	sb.WriteString(preview)
-	sb.WriteString("\n")
-	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(strings.Repeat("─", 40)))
-	sb.WriteString("\n")
-	for _, c := range relevant {
-		h := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33")).Render(fmt.Sprintf("  @%s", c.Author))
-		if c.Line > 0 {
-			h += lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(fmt.Sprintf(" line %d", c.Line))
-		}
-		sb.WriteString(h + "\n")
-		for _, line := range strings.Split(c.Body, "\n") {
-			sb.WriteString("  " + line + "\n")
-		}
-		sb.WriteString("\n")
-	}
-	return sb.String()
-}
-
-func appendNote(preview, path string, notes map[string]gh.Note) string {
-	note, ok := notes[path]
-	if !ok {
-		return preview
-	}
-	var sb strings.Builder
-	sb.WriteString(preview)
-	sb.WriteString("\n")
-	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Render(strings.Repeat("─", 40)))
-	sb.WriteString("\n")
-	sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("99")).Render("  ● your note") + "\n")
-	for _, line := range strings.Split(note.Body, "\n") {
-		sb.WriteString("  " + line + "\n")
-	}
-	return sb.String()
+func appendComments(preview, path string, threads map[string]*gh.NoteThread) string {
+	// No longer used — threads are injected inline. Kept for compatibility.
+	return preview
 }
 
 // ── header / footer ───────────────────────────────────────────────────────────
@@ -1516,10 +1586,10 @@ func (m Model) renderHeader() string {
 			Render(" [" + truncate(title, 50) + "]")
 	}
 
-	noteBadge := ""
-	if len(m.notes) > 0 {
-		noteBadge = lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Bold(true).
-			Render(fmt.Sprintf(" ●%d", len(m.notes)))
+	threadBadge := ""
+	if m.threadCount() > 0 {
+		threadBadge = lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Bold(true).
+			Render(fmt.Sprintf(" ●%d", m.threadCount()))
 	}
 
 	viewedBadge := ""
@@ -1528,7 +1598,6 @@ func (m Model) renderHeader() string {
 			Render(fmt.Sprintf(" ✓%d", len(m.viewed)))
 	}
 
-	// pane focus indicator
 	focusIndicator := ""
 	if m.zoomed {
 		focusIndicator = lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Bold(true).Render(" [zoom]")
@@ -1542,7 +1611,7 @@ func (m Model) renderHeader() string {
 	}
 	brand := styleBrand.Render("wake")
 	left := fmt.Sprintf("%s  %s%s%s", prompt, query, prLabel, focusIndicator)
-	right := fmt.Sprintf("%s%s%s  %s", count, noteBadge, viewedBadge, brand)
+	right := fmt.Sprintf("%s%s%s  %s", count, threadBadge, viewedBadge, brand)
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2
 	if gap < 1 {
 		gap = 1
@@ -1566,7 +1635,7 @@ func (m Model) renderFooter() string {
 			} else if m.previewClickedRow >= 0 {
 				noteHint = fmt.Sprintf("n note@row%d", m.previewClickedRow+1)
 			}
-			hints = fmt.Sprintf("j/k scroll · %s · z unzoom", noteHint)
+			hints = fmt.Sprintf("j/k scroll · %s · R reply · z unzoom", noteHint)
 		} else if m.focus == focusPreview {
 			noteHint := "n note"
 			if m.previewClickedLine > 0 {
@@ -1574,9 +1643,9 @@ func (m Model) renderFooter() string {
 			} else if m.previewClickedRow >= 0 {
 				noteHint = fmt.Sprintf("n note@row%d", m.previewClickedRow+1)
 			}
-			hints = fmt.Sprintf("j/k scroll · %s · h back to list", noteHint)
+			hints = fmt.Sprintf("j/k scroll · %s · R reply · h back to list", noteHint)
 		} else {
-			base := fmt.Sprintf("enter open · v viewed · V viewed-list · t %s · / grep · p peek · l preview · z zoom · n note · N notes · r refresh · H help", toggle)
+			base := fmt.Sprintf("enter open · v viewed · V viewed-list · t %s · / grep · p peek · l preview · z zoom · n note · R reply · N threads · r refresh · H help", toggle)
 			if m.pr != nil {
 				base += " · P publish"
 			}
@@ -1591,7 +1660,7 @@ func (m Model) renderFooter() string {
 	case ModePeekGrep:
 		hints = "enter open · f file list · esc back"
 	case ModeNotesList:
-		hints = "n edit · esc back"
+		hints = "n toggle · R reply · esc back"
 		if m.pr != nil {
 			hints += " · P publish"
 		}
@@ -1622,7 +1691,7 @@ func (m Model) promptLabel() string {
 	case ModePeekGrep:
 		return "repo-grep>"
 	case ModeNotesList:
-		return "notes>"
+		return "threads>"
 	case ModeViewedList:
 		return "viewed>"
 	case ModeHelp:
@@ -1722,8 +1791,19 @@ func statusStyle(s string) lipgloss.Style {
 	return lipgloss.NewStyle()
 }
 
+func layoutFromConfig(s string) previewLayout {
+	switch s {
+	case "bottom":
+		return layoutBottom
+	case "hidden":
+		return layoutHidden
+	default:
+		return layoutRight
+	}
+}
+
 func buildTreeRows(items []git.Item) []struct {
-	kind      int // 0=dir header, 1=item
+	kind      int
 	itemIndex int
 	dir       string
 } {
@@ -1748,17 +1828,6 @@ func buildTreeRows(items []git.Item) []struct {
 		rows = append(rows, row{kind: 1, itemIndex: i})
 	}
 	return rows
-}
-
-func layoutFromConfig(s string) previewLayout {
-	switch s {
-	case "bottom":
-		return layoutBottom
-	case "hidden":
-		return layoutHidden
-	default:
-		return layoutRight
-	}
 }
 
 func scrollWindow(cursor, total, height int) (start, end int) {
@@ -1850,4 +1919,49 @@ func truncateANSI(s string, max int) string {
 		i++
 	}
 	return out.String()
+}
+
+func centreBox(box string, w, h int) string {
+	bw := lipgloss.Width(box)
+	bh := lipgloss.Height(box)
+	padL := (w - bw) / 2
+	padT := (h - bh) / 2
+	if padL < 0 {
+		padL = 0
+	}
+	if padT < 0 {
+		padT = 0
+	}
+	left := strings.Repeat(" ", padL)
+	var sb strings.Builder
+	sb.WriteString(strings.Repeat("\n", padT))
+	for _, line := range strings.Split(box, "\n") {
+		sb.WriteString(left + line + "\n")
+	}
+	return sb.String()
+}
+
+func extractLineNumber(line string) int {
+	s := stripANSI(line)
+	s = strings.TrimLeft(s, " ")
+	if strings.HasPrefix(s, "@@") {
+		var new_ int
+		fmt.Sscanf(s, "@@ -%*d,%*d +%d", &new_)
+		if new_ == 0 {
+			fmt.Sscanf(s, "@@ -%*d +%d", &new_)
+		}
+		return new_
+	}
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i > 0 && i < len(s) {
+		n := 0
+		fmt.Sscanf(s[:i], "%d", &n)
+		if n > 0 {
+			return n
+		}
+	}
+	return 0
 }

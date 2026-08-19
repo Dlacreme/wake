@@ -17,8 +17,9 @@ type keyMap struct {
 	Zoom       key.Binding // z — zoom preview full-screen
 	Quit       key.Binding // q / ctrl-c
 	Esc        key.Binding // esc — back / cancel
-	Note       key.Binding // n — add/edit note
-	NotesList  key.Binding // N — view all notes
+	Note       key.Binding // n — new note / toggle thread
+	NotesList  key.Binding // N — view all threads
+	Reply      key.Binding // r — reply to thread
 	ViewedList key.Binding // V — view viewed files
 	Publish    key.Binding // P — publish PR review
 	Help       key.Binding // H — help popup
@@ -80,11 +81,15 @@ var keys = keyMap{
 	),
 	Note: key.NewBinding(
 		key.WithKeys("n"),
-		key.WithHelp("n", "note"),
+		key.WithHelp("n", "note/toggle"),
 	),
 	NotesList: key.NewBinding(
 		key.WithKeys("N"),
-		key.WithHelp("N", "notes"),
+		key.WithHelp("N", "threads"),
+	),
+	Reply: key.NewBinding(
+		key.WithKeys("R"),
+		key.WithHelp("R", "reply"),
 	),
 	ViewedList: key.NewBinding(
 		key.WithKeys("V"),
