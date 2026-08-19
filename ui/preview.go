@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mathieu/wake/git"
+	"github.com/Dlacreme/wake/git"
 )
 
 // previewLayout cycles through preview pane positions.

@@ -5,9 +5,9 @@ import (
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/mathieu/wake/config"
-	"github.com/mathieu/wake/git"
-	"github.com/mathieu/wake/ui"
+	"github.com/Dlacreme/wake/config"
+	"github.com/Dlacreme/wake/git"
+	"github.com/Dlacreme/wake/ui"
 )
 
 const usage = `wake — review a changeset you didn't write

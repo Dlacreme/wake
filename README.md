@@ -22,7 +22,7 @@ A terminal navigator for changed files. Start from what moved, jump to your edit
 **Requires Go 1.21+.**
 
 ```bash
-go install github.com/mathieu/wake@latest
+go install github.com/Dlacreme/wake@latest
 ```
 
 The binary lands in `$GOPATH/bin` (usually `~/go/bin`). Make sure that's on your `$PATH`.
@@ -37,7 +37,7 @@ brew install bat delta ripgrep   # macOS
 ### From source
 
 ```bash
-git clone https://github.com/mathieu/wake
+git clone https://github.com/Dlacreme/wake
 cd wake
 make install   # runs go install, puts wake in ~/go/bin
 ```

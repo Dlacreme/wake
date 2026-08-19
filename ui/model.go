@@ -11,8 +11,8 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mathieu/wake/config"
-	"github.com/mathieu/wake/git"
+	"github.com/Dlacreme/wake/config"
+	"github.com/Dlacreme/wake/git"
 	"github.com/sahilm/fuzzy"
 )
 

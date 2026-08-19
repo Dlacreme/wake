@@ -1,4 +1,4 @@
-module github.com/mathieu/wake
+module github.com/Dlacreme/wake
 
 go 1.26.6
 
