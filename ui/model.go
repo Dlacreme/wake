@@ -24,11 +24,13 @@ type Mode int
 
 const (
 	ModeList      Mode = iota // changed-file list
-	ModeGrep                  // grep results for changed files
-	ModePeek                  // whole-repo file list
+	ModeGrepInput             // typing a grep query (/ pressed)
+	ModeGrep                  // showing grep results
+	ModePeek                  // whole-repo file list (live fuzzy)
 	ModePeekGrep              // grep results for whole repo
 	ModeNote                  // note editor overlay
 	ModeNotesList             // view all pending notes
+	ModeHelp                  // help popup
 )
 
 // ── messages ──────────────────────────────────────────────────────────────────
@@ -200,78 +202,67 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// clear status message on any keypress
-	m.statusMsg = ""
+	// help popup: any key closes it
+	if m.mode == ModeHelp {
+		m.mode = m.savedMode
+		return m, nil
+	}
 
-	// note editor captures all keys except save/cancel
+	// note editor captures everything
 	if m.mode == ModeNote {
 		return m.handleNoteKey(msg)
 	}
 
-	isModePeek := m.mode == ModePeek || m.mode == ModePeekGrep
+	// grep input mode: user is typing a query
+	if m.mode == ModeGrepInput {
+		return m.handleGrepInputKey(msg)
+	}
 
+	// peek modes: typing filters live; special keys still work
+	if m.mode == ModePeek || m.mode == ModePeekGrep {
+		return m.handlePeekKey(msg)
+	}
+
+	// list / grep-results / notes-list: raw vim-style keys
+	m.statusMsg = ""
 	switch {
 	case key.Matches(msg, keys.Quit):
 		return m, tea.Quit
-
 	case key.Matches(msg, keys.Esc):
 		return m.handleEsc()
-
 	case key.Matches(msg, keys.Up):
 		return m.moveCursor(-1)
-
 	case key.Matches(msg, keys.Down):
 		return m.moveCursor(1)
-
 	case key.Matches(msg, keys.Enter):
 		return m.handleEnter()
-
 	case key.Matches(msg, keys.Viewed):
-		if !isModePeek && m.mode != ModeNotesList {
+		if m.mode != ModeNotesList {
 			return m.markViewed()
 		}
-
 	case key.Matches(msg, keys.Toggle):
-		if !isModePeek {
-			m.full = !m.full
-			return m, m.refreshPreviewCmd()
-		}
-
+		m.full = !m.full
+		return m, m.refreshPreviewCmd()
 	case key.Matches(msg, keys.Refresh):
-		m.statusMsg = ""
-		if isModePeek {
-			return m, loadPeekItems(m.root)
-		}
 		if m.pr != nil {
 			m.prLoading = true
 		}
 		return m, m.reloadListCmd()
-
 	case key.Matches(msg, keys.Layout):
 		m.layout = m.layout.next()
 		return m, nil
-
 	case key.Matches(msg, keys.Grep):
-		return m.handleGrep()
-
+		return m.handleGrepOpen()
 	case key.Matches(msg, keys.FileList):
 		return m.handleFileList()
-
 	case key.Matches(msg, keys.Peek):
-		if !isModePeek && m.mode != ModeNotesList {
+		if m.mode != ModeNotesList {
 			return m.handlePeekOpen()
 		}
-
 	case key.Matches(msg, keys.Note):
-		if !isModePeek {
-			return m.handleNoteOpen()
-		}
-
+		return m.handleNoteOpen()
 	case key.Matches(msg, keys.NotesList):
-		if !isModePeek {
-			return m.handleNotesList()
-		}
-
+		return m.handleNotesList()
 	case key.Matches(msg, keys.Publish):
 		if m.pr != nil && len(m.notes) > 0 {
 			return m, publishNotes(m.pr, m.notesSlice(), m.prFullDiff)
@@ -280,28 +271,79 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.statusMsg = "not in PR mode (use --pr)"
 		}
+	case key.Matches(msg, keys.Help):
+		m.savedMode = m.mode
+		m.mode = ModeHelp
+		return m, nil
+	}
+	return m, nil
+}
 
+// handleGrepInputKey handles keys while the user is typing a grep query.
+func (m Model) handleGrepInputKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, keys.Esc):
+		// cancel — back to list
+		m.mode = ModeList
+		m.query.SetValue("")
+		m.query.Blur()
+		return m, nil
+	case key.Matches(msg, keys.GrepExec):
+		// execute grep with current query
+		q := m.query.Value()
+		m.query.Blur()
+		if q == "" {
+			m.mode = ModeList
+			return m, nil
+		}
+		m.mode = ModeGrep
+		m.items = nil
+		return m, grepChanged(m.root, m.since, q, m.cfg.Exclude, m.cfg.Sort)
 	default:
 		var cmd tea.Cmd
-		if isModePeek {
-			m.peekQuery, cmd = m.peekQuery.Update(msg)
-			if m.mode == ModePeek {
-				m.filterPeekByQuery()
-				m.clampPeekCursor()
-				return m, tea.Batch(cmd, m.refreshPreviewCmd())
-			}
-		} else {
-			m.query, cmd = m.query.Update(msg)
-			if m.mode == ModeList {
-				m.filterListByQuery()
-				m.clampCursor()
-				return m, tea.Batch(cmd, m.refreshPreviewCmd())
-			}
+		m.query, cmd = m.query.Update(msg)
+		return m, cmd
+	}
+}
+
+// handlePeekKey handles keys in peek/peek-grep modes (live fuzzy filter).
+func (m Model) handlePeekKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	m.statusMsg = ""
+	switch {
+	case key.Matches(msg, keys.Quit):
+		return m, tea.Quit
+	case key.Matches(msg, keys.Esc):
+		return m.handleEsc()
+	case key.Matches(msg, keys.Up):
+		return m.moveCursor(-1)
+	case key.Matches(msg, keys.Down):
+		return m.moveCursor(1)
+	case key.Matches(msg, keys.Enter):
+		return m.handleEnter()
+	case key.Matches(msg, keys.Refresh):
+		return m, loadPeekItems(m.root)
+	case key.Matches(msg, keys.FileList):
+		return m.handleFileList()
+	case key.Matches(msg, keys.Layout):
+		m.layout = m.layout.next()
+		return m, nil
+	case key.Matches(msg, keys.Grep):
+		// / in peek → grep whole repo with current query
+		q := m.peekQuery.Value()
+		m.peekItems = nil
+		m.mode = ModePeekGrep
+		return m, grepAll(m.root, q)
+	default:
+		// typing filters live in peek mode
+		var cmd tea.Cmd
+		m.peekQuery, cmd = m.peekQuery.Update(msg)
+		if m.mode == ModePeek {
+			m.filterPeekByQuery()
+			m.clampPeekCursor()
+			return m, tea.Batch(cmd, m.refreshPreviewCmd())
 		}
 		return m, cmd
 	}
-
-	return m, nil
 }
 
 // ── note editor ───────────────────────────────────────────────────────────────
@@ -433,16 +475,12 @@ func (m Model) markViewed() (Model, tea.Cmd) {
 	return m, m.refreshPreviewCmd()
 }
 
-func (m Model) handleGrep() (Model, tea.Cmd) {
-	q := m.activeQuery()
-	if m.mode == ModePeek || m.mode == ModePeekGrep {
-		m.mode = ModePeekGrep
-		m.peekItems = nil
-		return m, grepAll(m.root, q)
-	}
-	m.mode = ModeGrep
-	m.items = nil
-	return m, grepChanged(m.root, m.since, q, m.cfg.Exclude, m.cfg.Sort)
+// handleGrepOpen enters grep-input mode (user types query, enter executes).
+func (m Model) handleGrepOpen() (Model, tea.Cmd) {
+	m.mode = ModeGrepInput
+	m.query.SetValue("")
+	m.query.Focus()
+	return m, textinput.Blink
 }
 
 func (m Model) handleFileList() (Model, tea.Cmd) {
@@ -716,6 +754,11 @@ func (m Model) View() string {
 		return ""
 	}
 
+	// help popup overlay
+	if m.mode == ModeHelp {
+		return m.renderHelp()
+	}
+
 	// note editor overlay
 	if m.mode == ModeNote {
 		return m.renderNoteEditor()
@@ -750,6 +793,104 @@ var styleOverlay = lipgloss.NewStyle().
 	Border(lipgloss.RoundedBorder()).
 	BorderForeground(lipgloss.Color("99")).
 	Padding(1, 2)
+
+// ── help popup ────────────────────────────────────────────────────────────────
+
+const helpText = `
+ wake — review a changeset you didn't write
+
+ ── Navigation ───────────────────────────────────────────
+  j / ↓      move down
+  k / ↑      move up
+  enter      open file in $EDITOR at first changed hunk
+  q          quit
+
+ ── View ─────────────────────────────────────────────────
+  t          toggle diff / whole-file view
+  tab        cycle preview layout (right → bottom → hidden)
+
+ ── Search ───────────────────────────────────────────────
+  /          grep changed files  (enter to search, esc cancel)
+  f          back to file list
+  p          peek: fuzzy-find any repo file (type to filter)
+  r          refresh
+
+ ── Review ───────────────────────────────────────────────
+  v          mark file viewed — hides it until its diff changes
+  n          add / edit a note on the current file
+  N          view all pending notes
+  P          publish notes as GitHub PR review  (--pr mode only)
+
+ ── Invocation ───────────────────────────────────────────
+  wake                       local changes vs HEAD
+  wake --since main          everything on this branch
+  wake --pr 42               review GitHub PR #42
+  wake --pr <url>            review by full GitHub URL
+
+ ── Config  ~/.config/wake/config.toml or .wake.toml ─────
+  editor, preview, preview_width, sort, exclude, since
+
+ ── Note editor ──────────────────────────────────────────
+  ctrl-s     save note
+  esc        cancel
+
+ press any key to close
+`
+
+func (m Model) renderHelp() string {
+	lines := strings.Split(strings.TrimPrefix(helpText, "\n"), "\n")
+
+	styleTitle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("99"))
+	styleSect := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33"))
+	styleDim := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	styleKey := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
+	styleNormal := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+
+	var rendered []string
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, " wake —"):
+			rendered = append(rendered, styleTitle.Render(line))
+		case strings.HasPrefix(line, " ──"):
+			rendered = append(rendered, styleSect.Render(line))
+		case strings.HasPrefix(line, "  ") && strings.Contains(line, "  "):
+			// key line: bold key, dim description
+			parts := strings.SplitN(strings.TrimLeft(line, " "), "  ", 2)
+			indent := strings.Repeat(" ", len(line)-len(strings.TrimLeft(line, " ")))
+			if len(parts) == 2 {
+				rendered = append(rendered, indent+styleKey.Render(parts[0])+"  "+styleDim.Render(strings.TrimLeft(parts[1], " ")))
+			} else {
+				rendered = append(rendered, styleDim.Render(line))
+			}
+		case strings.TrimSpace(line) == "press any key to close":
+			rendered = append(rendered, styleDim.Render(line))
+		default:
+			rendered = append(rendered, styleNormal.Render(line))
+		}
+	}
+
+	content := strings.Join(rendered, "\n")
+	box := styleOverlay.Render(content)
+
+	bw := lipgloss.Width(box)
+	bh := lipgloss.Height(box)
+	padL := (m.width - bw) / 2
+	padT := (m.height - bh) / 2
+	if padL < 0 {
+		padL = 0
+	}
+	if padT < 0 {
+		padT = 0
+	}
+	top := strings.Repeat("\n", padT)
+	left := strings.Repeat(" ", padL)
+	var sb strings.Builder
+	sb.WriteString(top)
+	for _, line := range strings.Split(box, "\n") {
+		sb.WriteString(left + line + "\n")
+	}
+	return sb.String()
+}
 
 func (m Model) renderNoteEditor() string {
 	title := fmt.Sprintf(" note: %s ", m.notePath)
@@ -1091,22 +1232,26 @@ func (m Model) renderFooter() string {
 		if m.full {
 			toggle = "full/diff"
 		}
-		base := fmt.Sprintf("enter open · v viewed · ctrl-t %s · ctrl-g grep · ctrl-p peek · n note · N notes · ctrl-r refresh · ctrl-/ layout", toggle)
+		base := fmt.Sprintf("enter open · v viewed · t %s · / grep · p peek · n note · N notes · r refresh · tab layout · H help", toggle)
 		if m.pr != nil {
-			base += " · ctrl-s publish"
+			base += " · P publish"
 		}
 		hints = base
 	case ModeGrep:
-		hints = "enter open · v viewed · n note · ctrl-f file list · ctrl-r refresh"
+		hints = "enter open · v viewed · n note · f file list · r refresh · H help"
+	case ModeGrepInput:
+		hints = "enter search · esc cancel"
 	case ModePeek:
-		hints = "enter open · ctrl-g grep repo · ctrl-f file list · esc back"
+		hints = "enter open · type to filter · / grep repo · f file list · esc back"
 	case ModePeekGrep:
-		hints = "enter open · ctrl-f file list · esc back"
+		hints = "enter open · f file list · esc back"
 	case ModeNotesList:
-		hints = "esc back"
+		hints = "n edit · esc back"
 		if m.pr != nil {
-			hints += " · ctrl-s publish"
+			hints += " · P publish"
 		}
+	case ModeHelp:
+		hints = "any key to close"
 	}
 
 	if m.statusMsg != "" {
@@ -1125,6 +1270,8 @@ func (m Model) renderFooter() string {
 
 func (m Model) promptLabel() string {
 	switch m.mode {
+	case ModeGrepInput:
+		return "grep/"
 	case ModeGrep:
 		return "grep>"
 	case ModePeek:
@@ -1133,6 +1280,8 @@ func (m Model) promptLabel() string {
 		return "repo-grep>"
 	case ModeNotesList:
 		return "notes>"
+	case ModeHelp:
+		return "help"
 	default:
 		return "changed>"
 	}
