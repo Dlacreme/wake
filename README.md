@@ -25,7 +25,7 @@ A terminal navigator for changed files. Start from what moved, jump to your edit
 go install github.com/Dlacreme/wake@latest
 ```
 
-The binary lands in `$GOPATH/bin` (usually `~/go/bin`). Make sure that's on your `$PATH`.
+The binary lands in `$GOPATH/bin` (usually `~/go/bin`). Make sure that's on your `$PATH`, or use the from-source method below which installs to `~/.local/bin` instead.
 
 **Optional but recommended** — wake uses these when present:
 
@@ -39,7 +39,13 @@ brew install bat delta ripgrep   # macOS
 ```bash
 git clone https://github.com/Dlacreme/wake
 cd wake
-make install   # runs go install, puts wake in ~/go/bin
+make install   # builds and copies to ~/.local/bin/wake
+```
+
+`make install` uses `~/.local/bin` by default (`PREFIX=~/.local`). Override with:
+
+```bash
+make install PREFIX=/usr/local
 ```
 
 ## Usage
