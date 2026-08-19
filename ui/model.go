@@ -41,6 +41,7 @@ type prLoadedMsg struct {
 	pr       gh.PR
 	comments []gh.ReviewComment
 	fullDiff string
+	files    []string
 }
 type publishDoneMsg struct{ err error }
 
@@ -128,11 +129,11 @@ func New(root, since string, cfg config.Config, pr *gh.PR) Model {
 // ── Bubble Tea interface ───────────────────────────────────────────────────────
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{loadItems(m.root, m.since, m.cfg.Exclude, m.cfg.Sort)}
 	if m.pr != nil {
-		cmds = append(cmds, loadPR(m.pr))
+		// PR mode: load PR metadata first; items come from the PR file list
+		return loadPR(m.pr)
 	}
-	return tea.Batch(cmds...)
+	return loadItems(m.root, m.since, m.cfg.Exclude, m.cfg.Sort)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -163,6 +164,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.prComments = msg.comments
 		m.prFullDiff = msg.fullDiff
 		m.statusMsg = fmt.Sprintf("PR #%d: %s", msg.pr.Number, msg.pr.Title)
+		// Build item list from PR file list
+		items := prFilesToItems(msg.files, msg.fullDiff)
+		cachedChangedItems = items
+		m.items = items
+		m.clampCursor()
 		return m, m.refreshPreviewCmd()
 
 	case publishDoneMsg:
@@ -568,8 +574,34 @@ func loadPR(pr *gh.PR) tea.Cmd {
 		if err != nil {
 			return errMsg{err}
 		}
-		return prLoadedMsg{pr: *pr, comments: comments, fullDiff: fullDiff}
+		files, err := gh.Files(*pr)
+		if err != nil {
+			return errMsg{err}
+		}
+		return prLoadedMsg{pr: *pr, comments: comments, fullDiff: fullDiff, files: files}
 	}
+}
+
+// prFilesToItems builds the item list from a PR file list + diff.
+// Status is inferred from the diff headers (new file / deleted file / modified).
+func prFilesToItems(files []string, fullDiff string) []git.Item {
+	items := make([]git.Item, 0, len(files))
+	for _, f := range files {
+		if f == "" {
+			continue
+		}
+		fileDiff := gh.FileDiff(fullDiff, f)
+		st := git.StatusModified
+		if strings.Contains(fileDiff, "\nnew file mode") {
+			st = git.StatusAdded
+		} else if strings.Contains(fileDiff, "\ndeleted file mode") {
+			st = git.StatusDeleted
+		} else if strings.Contains(fileDiff, "rename from ") {
+			st = git.StatusRenamed
+		}
+		items = append(items, git.Item{Status: st, Path: f})
+	}
+	return items
 }
 
 func publishNotes(pr *gh.PR, notes []gh.Note, fullDiff string) tea.Cmd {
@@ -643,19 +675,20 @@ func (m Model) refreshPreviewCmd() tea.Cmd {
 	comments := m.prComments
 	prFullDiff := m.prFullDiff
 	notes := m.notes
+	isPR := m.pr != nil
 	return func() tea.Msg {
-		content := renderPreview(root, since, it, full, w)
-		// append existing PR comments for this file
-		content = appendComments(content, it.Path, comments)
-		// append pending note for this file
-		content = appendNote(content, it.Path, notes)
-		// in PR mode, use the PR diff if local diff is empty
-		if content == "" && prFullDiff != "" {
+		var content string
+		if isPR && prFullDiff != "" {
+			// PR mode: always render from the PR diff
 			fileDiff := gh.FileDiff(prFullDiff, it.Path)
 			if fileDiff != "" {
-				content = fileDiff
+				content = renderDiffText(fileDiff, w)
 			}
+		} else {
+			content = renderPreview(root, since, it, full, w)
 		}
+		content = appendComments(content, it.Path, comments)
+		content = appendNote(content, it.Path, notes)
 		return previewReadyMsg{content}
 	}
 }

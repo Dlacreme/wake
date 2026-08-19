@@ -71,8 +71,11 @@ func main() {
 	}
 
 	// validate git.ChangedItems can run (error early on bad state)
-	if _, err := git.ChangedItems(root, since, cfg.Exclude, cfg.Sort); err != nil {
-		die(err.Error())
+	// skip in PR mode — the PR diff is the file source, not local changes
+	if prRef == "" {
+		if _, err := git.ChangedItems(root, since, cfg.Exclude, cfg.Sort); err != nil {
+			die(err.Error())
+		}
 	}
 
 	// parse PR ref if provided

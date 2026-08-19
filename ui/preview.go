@@ -127,7 +127,22 @@ func renderDeleted(root, since, path string) string {
 	return header + renderDiff(root, since, path, 100)
 }
 
-// ── shell helpers ─────────────────────────────────────────────────────────────
+// renderDiffText renders a raw unified diff string through delta or plain.
+// Used for PR diffs where we already have the diff text.
+func renderDiffText(diffText string, width int) string {
+	if diffText == "" {
+		return dim("(no diff)")
+	}
+	if haveBin("delta") {
+		out, err := pipeToDelta(diffText, width)
+		if err == nil {
+			return out
+		}
+	}
+	return diffText
+}
+
+
 
 func gitDiffRaw(root, ref, path string) string {
 	c := exec.Command("git", "diff", "--no-color", ref, "--", path)
