@@ -1067,9 +1067,11 @@ func injectThreads(lines []string, path string, threads map[string]*gh.NoteThrea
 
 		out = append(out, line)
 
-		// inject thread after this line if one is anchored here
+		// inject thread after this line if one is anchored here — delete after
+		// injection so it only fires once even if currentLine stays the same
 		if t, ok := lineThreads[currentLine]; ok {
 			out = append(out, renderThreadBlock(t, width)...)
+			delete(lineThreads, currentLine)
 		}
 	}
 	return out
