@@ -18,9 +18,12 @@ type keyMap struct {
 	Quit      key.Binding // q / ctrl-c
 	Esc       key.Binding // esc — back / cancel
 	Note      key.Binding // n — add/edit note
-	NotesList key.Binding // N — view all notes
+	NotesList  key.Binding // N — view all notes
+	ViewedList key.Binding // V — view viewed files
 	Publish   key.Binding // P — publish PR review
 	Help      key.Binding // H — help popup
+	FocusNext key.Binding // l — focus preview pane
+	FocusPrev key.Binding // h — focus list pane
 	// inside note editor / grep prompt
 	Submit    key.Binding // ctrl-s — save note
 	GrepExec  key.Binding // ctrl-g — execute grep from prompt
@@ -84,6 +87,10 @@ var keys = keyMap{
 		key.WithKeys("N"),
 		key.WithHelp("N", "notes"),
 	),
+	ViewedList: key.NewBinding(
+		key.WithKeys("V"),
+		key.WithHelp("V", "viewed list"),
+	),
 	Publish: key.NewBinding(
 		key.WithKeys("P"),
 		key.WithHelp("P", "publish"),
@@ -91,6 +98,14 @@ var keys = keyMap{
 	Help: key.NewBinding(
 		key.WithKeys("H"),
 		key.WithHelp("H", "help"),
+	),
+	FocusNext: key.NewBinding(
+		key.WithKeys("l"),
+		key.WithHelp("l", "focus preview"),
+	),
+	FocusPrev: key.NewBinding(
+		key.WithKeys("h"),
+		key.WithHelp("h", "focus list"),
 	),
 	// typing-mode bindings (grep prompt, note editor)
 	Submit: key.NewBinding(
