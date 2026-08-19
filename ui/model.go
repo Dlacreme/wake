@@ -941,9 +941,19 @@ func (m Model) refreshPreviewCmd() tea.Cmd {
 	return func() tea.Msg {
 		var content string
 		if isPR && prFullDiff != "" {
-			fileDiff := gh.FileDiff(prFullDiff, it.Path)
-			if fileDiff != "" {
-				content = renderDiffText(fileDiff, w)
+			if full {
+				// full-file mode: read actual file content
+				content = renderPreview(root, since, it, true, w)
+				// fall back to PR diff if file doesn't exist locally
+				if content == "" {
+					fileDiff := gh.FileDiff(prFullDiff, it.Path)
+					content = renderDiffText(fileDiff, w)
+				}
+			} else {
+				fileDiff := gh.FileDiff(prFullDiff, it.Path)
+				if fileDiff != "" {
+					content = renderDiffText(fileDiff, w)
+				}
 			}
 		} else {
 			content = renderPreview(root, since, it, full, w)
