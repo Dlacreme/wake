@@ -1333,7 +1333,7 @@ func (m Model) renderList(width, height int) string {
 		var line string
 
 		if r.kind == 0 {
-			line = styleDirHeader.Render("  " + r.dir + "/")
+			line = styleDirHeader.Render("  "+r.dir+"/") + "\033[0m"
 			line = padRight(line, width)
 		} else {
 			it := items[r.itemIndex]
@@ -1366,7 +1366,7 @@ func (m Model) renderList(width, height int) string {
 				if len([]rune(padded)) > width {
 					padded = string([]rune(padded)[:width])
 				}
-				line = styleSelected.Render(padded)
+				line = styleSelected.Render(padded) + "\033[0m"
 			}
 		}
 
@@ -1412,12 +1412,11 @@ func (m Model) renderPreviewPane(width, height int) string {
 		absoluteI := start + i
 		if m.previewClickedRow >= 0 && absoluteI == m.previewClickedRow {
 			plain := stripANSI(line)
-			// pad to exact width, then cap — prevents background bleed
 			padded := plain + strings.Repeat(" ", max(0, width-len([]rune(plain))))
 			if len([]rune(padded)) > width {
 				padded = string([]rune(padded)[:width])
 			}
-			sb.WriteString(styleClickedLine.Render(padded))
+			sb.WriteString(styleClickedLine.Render(padded) + "\033[0m")
 			sb.WriteByte('\n')
 			continue
 		}
