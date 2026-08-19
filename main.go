@@ -80,15 +80,21 @@ func main() {
 
 	// parse PR ref if provided
 	var pr *gh.PR
+	prRepoMatch := true // default true (no PR = local = always matches)
 	if prRef != "" {
 		parsed, err := gh.Parse(prRef, root)
 		if err != nil {
 			die(err.Error())
 		}
 		pr = &parsed
+		// check if PR repo matches local git remote
+		localRemote := git.RemoteRepo(root)
+		prRepo := parsed.Owner + "/" + parsed.Repo
+		prRepoMatch = localRemote != "" &&
+			strings.EqualFold(localRemote, prRepo)
 	}
 
-	m := ui.New(root, since, cfg, pr)
+	m := ui.New(root, since, cfg, pr, prRepoMatch)
 	p := tea.NewProgram(m,
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),

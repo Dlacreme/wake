@@ -95,9 +95,10 @@ type Model struct {
 	root  string
 	since string
 
-	pr         *gh.PR
-	prFullDiff string
-	prLoading  bool
+	pr           *gh.PR
+	prFullDiff   string
+	prLoading    bool
+	prRepoMatch  bool // true when PR repo matches local git remote
 
 	// threads: key = gh.ThreadKey(path, line)
 	threads   map[string]*gh.NoteThread
@@ -111,7 +112,7 @@ type Model struct {
 
 // ── constructor ───────────────────────────────────────────────────────────────
 
-func New(root, since string, cfg config.Config, pr *gh.PR) Model {
+func New(root, since string, cfg config.Config, pr *gh.PR, prRepoMatch bool) Model {
 	qi := textinput.New()
 	qi.Placeholder = ""
 	qi.Prompt = ""
@@ -141,6 +142,7 @@ func New(root, since string, cfg config.Config, pr *gh.PR) Model {
 		layout:            layoutFromConfig(cfg.Layout),
 		pr:                pr,
 		prLoading:         pr != nil,
+		prRepoMatch:       prRepoMatch,
 		previewClickedRow: -1,
 	}
 }
@@ -700,6 +702,11 @@ func (m Model) handleEnter() (Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	// can't open editor for a PR from a different repo
+	if m.pr != nil && !m.prRepoMatch {
+		m.statusMsg = "editor unavailable — PR is from a different repository"
+		return m, nil
+	}
 	item := m.selectedItem()
 	if item == nil {
 		return m, nil
@@ -972,16 +979,25 @@ func (m Model) refreshPreviewCmd() tea.Cmd {
 	it := *item
 	prFullDiff := m.prFullDiff
 	isPR := m.pr != nil
+	prRepoMatch := m.prRepoMatch
 	threads := m.threads
 	return func() tea.Msg {
 		var content string
 		if isPR && prFullDiff != "" {
-			if full {
+			if full && prRepoMatch {
+				// full-file only works when files exist locally
 				content = renderPreview(root, since, it, true, w)
 				if content == "" {
 					fileDiff := gh.FileDiff(prFullDiff, it.Path)
 					content = renderDiffText(fileDiff, w)
 				}
+			} else if full && !prRepoMatch {
+				// can't read local files — fall back to PR diff with a notice
+				fileDiff := gh.FileDiff(prFullDiff, it.Path)
+				notice := lipgloss.NewStyle().
+					Foreground(lipgloss.Color("214")).Bold(true).
+					Render("  ⚠  full-file view unavailable (PR from a different repository)") + "\n\n"
+				content = notice + renderDiffText(fileDiff, w)
 			} else {
 				fileDiff := gh.FileDiff(prFullDiff, it.Path)
 				if fileDiff != "" {
@@ -1582,8 +1598,16 @@ func (m Model) renderHeader() string {
 		} else {
 			title = fmt.Sprintf("PR #%d: %s", m.pr.Number, title)
 		}
-		prLabel = lipgloss.NewStyle().Foreground(lipgloss.Color("33")).
+		color := lipgloss.Color("33")
+		if !m.prRepoMatch {
+			color = lipgloss.Color("214") // amber = different repo warning
+		}
+		prLabel = lipgloss.NewStyle().Foreground(color).
 			Render(" [" + truncate(title, 50) + "]")
+		if !m.prRepoMatch {
+			prLabel += lipgloss.NewStyle().Foreground(lipgloss.Color("214")).
+				Render(" ⚠ external repo")
+		}
 	}
 
 	threadBadge := ""

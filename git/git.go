@@ -39,6 +39,30 @@ func Root() (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
+// RemoteRepo returns "owner/repo" for the origin remote, or "" if unresolvable.
+// Handles both SSH (git@github.com:owner/repo.git) and HTTPS forms.
+func RemoteRepo(root string) string {
+	out, err := run(root, "git", "remote", "get-url", "origin")
+	if err != nil {
+		return ""
+	}
+	url := strings.TrimSpace(out)
+	// SSH: git@github.com:owner/repo.git
+	if idx := strings.Index(url, ":"); idx > 0 && !strings.HasPrefix(url, "http") {
+		path := url[idx+1:]
+		path = strings.TrimSuffix(path, ".git")
+		return path
+	}
+	// HTTPS: https://github.com/owner/repo.git
+	parts := strings.Split(url, "/")
+	if len(parts) >= 2 {
+		owner := parts[len(parts)-2]
+		repo := strings.TrimSuffix(parts[len(parts)-1], ".git")
+		return owner + "/" + repo
+	}
+	return ""
+}
+
 // ValidateRef returns an error if ref is not a valid git ref.
 func ValidateRef(root, ref string) error {
 	_, err := run(root, "git", "rev-parse", "--verify", ref)
