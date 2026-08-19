@@ -564,7 +564,7 @@ func (m Model) renderList(width, height int) string {
 		empty := lipgloss.NewStyle().
 			Width(width).Height(height).
 			Foreground(lipgloss.Color("240")).
-			Render("  (empty)")
+			Render("  nothing changed")
 		return empty
 	}
 

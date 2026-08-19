@@ -64,17 +64,8 @@ func main() {
 	}
 
 	// fast-path: nothing changed?
-	items, err := git.ChangedItems(root, since, cfg.Exclude, cfg.Sort)
-	if err != nil {
+	if _, err := git.ChangedItems(root, since, cfg.Exclude, cfg.Sort); err != nil {
 		die(err.Error())
-	}
-	if len(items) == 0 {
-		msg := "wake: nothing changed"
-		if since != "" {
-			msg += " since " + since
-		}
-		fmt.Println(msg + ".")
-		os.Exit(0)
 	}
 
 	m := ui.New(root, since, cfg)
