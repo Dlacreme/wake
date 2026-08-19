@@ -1041,34 +1041,64 @@ func (m Model) renderList(width, height int) string {
 			Render(msg)
 	}
 
-	start, end := scrollWindow(cursor, len(items), height)
+	// build a flat list of visual rows: dir headers + item rows
+	rows := buildTreeRows(items)
+
+	// find which visual row the cursor is on
+	cursorRow := 0
+	for ri, r := range rows {
+		if r.kind == 1 && r.itemIndex == cursor {
+			cursorRow = ri
+			break
+		}
+	}
+
+	// scroll window over visual rows
+	startR, endR := scrollWindow(cursorRow, len(rows), height)
+
+	styleDirHeader := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("240"))
 
 	var sb strings.Builder
-	for i := start; i < end; i++ {
-		it := items[i]
-		stStyle := statusStyle(it.Status)
-		st := stStyle.Render(it.Status)
+	for ri := startR; ri < endR; ri++ {
+		r := rows[ri]
+		var line string
 
-		// note marker
-		noteMark := ""
-		if _, hasNote := m.notes[it.Path]; hasNote {
-			noteMark = styleNote.Render("●") + " "
-		}
-
-		var label string
-		if it.Status == git.StatusGrep {
-			label = fmt.Sprintf("%s:%d  %s", it.Path, it.Line, truncate(it.Text, width-20))
+		if r.kind == 0 {
+			line = styleDirHeader.Render("  " + r.dir + "/")
+			line = padRight(line, width)
 		} else {
-			label = it.Path
+			it := items[r.itemIndex]
+			stStyle := statusStyle(it.Status)
+			st := stStyle.Render(it.Status)
+
+			noteMark := ""
+			if _, hasNote := m.notes[it.Path]; hasNote {
+				noteMark = styleNote.Render("●") + " "
+			}
+
+			var label string
+			if it.Status == git.StatusGrep {
+				label = fmt.Sprintf("%s:%d  %s", it.Path, it.Line, truncate(it.Text, width-20))
+			} else {
+				label = filepath.Base(it.Path)
+			}
+
+			// indent if file is inside a directory
+			indent := "  "
+			if strings.Contains(it.Path, "/") {
+				indent = "    "
+			}
+
+			line = fmt.Sprintf("%s%s  %s%s", indent, st, noteMark, label)
+			line = truncate(line, width)
+			line = padRight(line, width)
+
+			if r.itemIndex == cursor {
+				line = styleSelected.Width(width).Render(line)
+			}
 		}
 
-		line := fmt.Sprintf("  %s  %s%s", st, noteMark, label)
-		line = truncate(line, width)
-		line = padRight(line, width)
-
-		if i == cursor {
-			line = styleSelected.Width(width).Render(line)
-		}
 		sb.WriteString(line)
 		sb.WriteByte('\n')
 	}
@@ -1356,6 +1386,38 @@ func statusStyle(s string) lipgloss.Style {
 		return styleStatusP
 	}
 	return lipgloss.NewStyle()
+}
+
+// buildTreeRows converts a flat item list into visual rows with directory headers.
+// Items already sorted (alpha or mtime). Groups consecutive items sharing the
+// same parent directory under a single dim header. Root-level files get no header.
+func buildTreeRows(items []git.Item) []struct {
+	kind      int // 0=dir header, 1=item
+	itemIndex int
+	dir       string
+} {
+	type row = struct {
+		kind      int
+		itemIndex int
+		dir       string
+	}
+	var rows []row
+	lastDir := "\x00"
+
+	for i, it := range items {
+		dir := filepath.Dir(it.Path)
+		if dir == "." {
+			dir = ""
+		}
+		if dir != lastDir {
+			if dir != "" {
+				rows = append(rows, row{kind: 0, dir: dir})
+			}
+			lastDir = dir
+		}
+		rows = append(rows, row{kind: 1, itemIndex: i})
+	}
+	return rows
 }
 
 func scrollWindow(cursor, total, height int) (start, end int) {
