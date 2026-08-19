@@ -33,7 +33,7 @@ A Go binary (~700 lines across `git/`, `ui/`, `config/`) wrapping Bubble Tea. No
 |---|---|
 | `enter` | Open in `$EDITOR` at the first changed hunk |
 | `v` | Mark file viewed — hides it until its diff changes |
-| `ctrl-d` | Toggle diff view / whole-file view |
+| `ctrl-t` | Toggle diff view / whole-file view |
 | `ctrl-g` | Grep **only the changed files**, using whatever you've typed |
 | `ctrl-f` | Back to the changed-file list |
 | `ctrl-p` | **Peek** — fuzzy-find any file in the repo, read it, `esc` to return |
@@ -64,7 +64,7 @@ Re-litigate these only with new information — each was argued through.
 
 **Diff against `HEAD`, not the index.** A plain `git diff` shows nothing for staged-only changes. Diffing `HEAD` catches the work whether or not the agent staged it.
 
-**New files preview as whole files, not diffs.** The diff of a new file is "everything added," which is noise when you have no mental model of it. `ctrl-d` gives the reverse toggle for modified files.
+**New files preview as whole files, not diffs.** The diff of a new file is "everything added," which is noise when you have no mental model of it. `ctrl-t` gives the reverse toggle for modified files.
 
 **Sub-second mtimes for recency sort.** Uses `syscall.Stat` directly (platform-split build files: `mtime_bsd.go`, `mtime_linux.go`, `mtime_other.go`).
 

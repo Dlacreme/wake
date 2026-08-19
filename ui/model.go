@@ -1079,7 +1079,7 @@ func (m Model) renderFooter() string {
 		if m.full {
 			toggle = "full/diff"
 		}
-		base := fmt.Sprintf("enter open · v viewed · ctrl-d %s · ctrl-g grep · ctrl-p peek · n note · N notes · ctrl-r refresh · ctrl-/ layout", toggle)
+		base := fmt.Sprintf("enter open · v viewed · ctrl-t %s · ctrl-g grep · ctrl-p peek · n note · N notes · ctrl-r refresh · ctrl-/ layout", toggle)
 		if m.pr != nil {
 			base += " · ctrl-s publish"
 		}

@@ -13,7 +13,7 @@ A terminal navigator for changed files. Start from what moved, jump to your edit
 │ D  deleted.txt   │ +changed line                        │
 │ R  renamed.txt   │  second line                         │
 ├──────────────────┴──────────────────────────────────────┤
-│ enter open · v viewed · ctrl-d diff/full · ctrl-p peek  │
+│ enter open · v viewed · ctrl-t diff/full · ctrl-p peek  │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -66,7 +66,7 @@ wake --pr https://github.com/owner/repo/pull/42
 | `v` | Mark viewed — hides the file until its diff changes |
 | `n` | Add/edit a note on the current file |
 | `N` | View all pending notes |
-| `ctrl-d` | Toggle diff / whole-file view |
+| `ctrl-t` | Toggle diff / whole-file view |
 | `ctrl-g` | Grep the changed files only |
 | `ctrl-f` | Back to the changed-file list |
 | `ctrl-p` | Peek — fuzzy-find any file in the repo, `esc` to return |

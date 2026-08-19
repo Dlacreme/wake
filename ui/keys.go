@@ -7,7 +7,7 @@ type keyMap struct {
 	Down      key.Binding
 	Enter     key.Binding
 	Viewed    key.Binding // v — mark file viewed
-	Toggle    key.Binding // ctrl-d — diff/full
+	Toggle    key.Binding // ctrl-t — diff/full
 	Grep      key.Binding // ctrl-g
 	FileList  key.Binding // ctrl-f
 	Peek      key.Binding // ctrl-p
@@ -39,8 +39,8 @@ var keys = keyMap{
 		key.WithHelp("v", "mark viewed"),
 	),
 	Toggle: key.NewBinding(
-		key.WithKeys("ctrl+d"),
-		key.WithHelp("ctrl-d", "diff/full"),
+		key.WithKeys("ctrl+t"),
+		key.WithHelp("ctrl-t", "diff/full"),
 	),
 	Grep: key.NewBinding(
 		key.WithKeys("ctrl+g"),

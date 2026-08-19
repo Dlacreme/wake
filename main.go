@@ -26,7 +26,7 @@ Keys:
   v           mark file viewed (hides it until its diff changes)
   n           add/edit a note on the current file
   N           view all pending notes
-  ctrl-d      toggle diff / whole-file view
+  ctrl-t      toggle diff / whole-file view
   ctrl-g      grep the changed files only
   ctrl-f      back to the changed-file list
   ctrl-p      peek: fuzzy-find any file in the repo
