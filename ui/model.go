@@ -77,7 +77,8 @@ type Model struct {
 	preview             string
 	previewLines        []string // raw lines, for click line mapping
 	previewScrollOffset int      // first visible line
-	previewClickedLine  int      // file line last clicked (0 = none)
+	previewClickedRow   int      // visual row last clicked (-1 = none)
+	previewClickedLine  int      // file line parsed from clicked row (0 = unknown)
 	layout              previewLayout
 	full                bool
 
@@ -131,19 +132,20 @@ func New(root, since string, cfg config.Config, pr *gh.PR) Model {
 	ta.SetHeight(8)
 
 	return Model{
-		mode:      ModeList,
-		focus:     focusList,
-		viewed:    make(map[string]string),
-		notes:     make(map[string]gh.Note),
-		query:     qi,
-		peekQuery: pi,
-		noteTA:    ta,
-		cfg:       cfg,
-		root:      root,
-		since:     since,
-		full:      cfg.Preview == "full",
-		pr:        pr,
-		prLoading: pr != nil,
+		mode:               ModeList,
+		focus:              focusList,
+		viewed:             make(map[string]string),
+		notes:              make(map[string]gh.Note),
+		query:              qi,
+		peekQuery:          pi,
+		noteTA:             ta,
+		cfg:                cfg,
+		root:               root,
+		since:              since,
+		full:               cfg.Preview == "full",
+		pr:                 pr,
+		prLoading:          pr != nil,
+		previewClickedRow:  -1,
 	}
 }
 
@@ -471,21 +473,25 @@ func (m Model) handleListClick(row int) (Model, tea.Cmd) {
 }
 
 func (m Model) handlePreviewClick(row int) (Model, tea.Cmd) {
-	// map visual row → line in previewLines (accounting for scroll)
+	m.focus = focusPreview
+
+	// absolute index into previewLines
 	lineIndex := m.previewScrollOffset + row
 	if lineIndex < 0 || lineIndex >= len(m.previewLines) {
-		m.focus = focusPreview
 		return m, nil
 	}
 
-	// extract file line number from the line text
-	// bat/delta prefix lines with "  N │ content" or plain "  N  content"
+	// store visual row for reliable highlighting
+	m.previewClickedRow = lineIndex
+
+	// try to parse a file line number for annotation
 	fileLine := extractLineNumber(m.previewLines[lineIndex])
 	m.previewClickedLine = fileLine
-	m.focus = focusPreview
 
 	if fileLine > 0 {
 		m.statusMsg = fmt.Sprintf("line %d selected — press n to annotate", fileLine)
+	} else {
+		m.statusMsg = "line selected — press n to annotate"
 	}
 
 	return m, nil
@@ -533,9 +539,12 @@ func (m Model) handleNoteOpen() (Model, tea.Cmd) {
 		return m, nil
 	}
 	m.notePath = item.Path
-	// use clicked preview line if we're in preview focus, else item line
-	if m.focus == focusPreview && m.previewClickedLine > 0 {
+	// use clicked preview line if available (regardless of focus)
+	if m.previewClickedRow >= 0 && m.previewClickedLine > 0 {
 		m.noteLine = m.previewClickedLine
+	} else if m.previewClickedRow >= 0 {
+		// clicked but line number unknown — use row as approximation
+		m.noteLine = m.previewClickedRow + 1
 	} else {
 		m.noteLine = item.Line
 	}
@@ -625,6 +634,10 @@ func (m Model) moveCursor(delta int) (Model, tea.Cmd) {
 	} else {
 		m.cursor = clamp(m.cursor+delta, 0, len(m.items)-1)
 	}
+	// clear preview click state when file changes
+	m.previewClickedRow = -1
+	m.previewClickedLine = 0
+	m.previewScrollOffset = 0
 	return m, m.refreshPreviewCmd()
 }
 
@@ -1365,21 +1378,19 @@ func (m Model) renderPreviewPane(width, height int) string {
 	}
 
 	styleClickedLine := lipgloss.NewStyle().
-		Background(lipgloss.Color("235")).
-		Foreground(lipgloss.Color("214"))
+		Background(lipgloss.Color("57")).
+		Foreground(lipgloss.Color("255")).
+		Bold(true)
 
 	var sb strings.Builder
 	for i, line := range visible {
-		// highlight clicked line if it matches
 		absoluteI := start + i
-		if m.previewClickedLine > 0 && absoluteI < len(m.previewLines) {
-			lineNum := extractLineNumber(m.previewLines[absoluteI])
-			if lineNum == m.previewClickedLine {
-				line = styleClickedLine.Render(padRight(stripANSI(line), width))
-				sb.WriteString(line)
-				sb.WriteByte('\n')
-				continue
-			}
+		// highlight by visual row index — reliable regardless of line format
+		if m.previewClickedRow >= 0 && absoluteI == m.previewClickedRow {
+			line = styleClickedLine.Render(padRight(stripANSI(line), width))
+			sb.WriteString(line)
+			sb.WriteByte('\n')
+			continue
 		}
 		visible2 := stripANSI(line)
 		if len(visible2) > width {
@@ -1517,7 +1528,13 @@ func (m Model) renderFooter() string {
 			toggle = "full/diff"
 		}
 		if m.focus == focusPreview {
-			hints = "j/k scroll · n note at line · h back to list"
+			noteHint := "n note"
+			if m.previewClickedLine > 0 {
+				noteHint = fmt.Sprintf("n note@line%d", m.previewClickedLine)
+			} else if m.previewClickedRow >= 0 {
+				noteHint = fmt.Sprintf("n note@row%d", m.previewClickedRow+1)
+			}
+			hints = fmt.Sprintf("j/k scroll · %s · h back to list", noteHint)
 		} else {
 			base := fmt.Sprintf("enter open · v viewed · V viewed-list · t %s · / grep · p peek · l preview · n note · N notes · r refresh · tab layout · H help", toggle)
 			if m.pr != nil {
