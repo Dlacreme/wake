@@ -38,7 +38,7 @@ A Go binary (~700 lines across `git/`, `ui/`, `config/`) wrapping Bubble Tea. No
 | `ctrl-f` | Back to the changed-file list |
 | `ctrl-p` | **Peek** — fuzzy-find any file in the repo, read it, `esc` to return |
 | `ctrl-r` | Refresh |
-| `ctrl-/` | Cycle preview layout (right → bottom → hidden) |
+| `z` | Zoom preview full-screen (toggle) |
 | `↑/k`, `↓/j` | Navigate |
 | `q` / `ctrl-c` | Quit |
 
@@ -119,6 +119,7 @@ since          = ""           # default base ref
 preview        = "diff"       # "diff" | "full"
 preview_width  = 62           # percent
 sort           = "alpha"      # "alpha" or "mtime"
+layout         = "right"      # "right" | "bottom" | "hidden"
 exclude        = ["*.lock", "dist/**", "*.snap"]
 ```
 

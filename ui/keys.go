@@ -5,29 +5,28 @@ import "github.com/charmbracelet/bubbles/key"
 // Navigation and list-mode keys use raw letters (vim-style).
 // ctrl is only used where the user is actively typing (grep prompt, note editor).
 type keyMap struct {
-	Up        key.Binding // k / ↑
-	Down      key.Binding // j / ↓
-	Enter     key.Binding // enter — open in editor
-	Viewed    key.Binding // v — mark viewed
-	Toggle    key.Binding // t — diff/full toggle
-	Grep      key.Binding // / — grep changed files
-	FileList  key.Binding // f — back to file list
-	Peek      key.Binding // p — peek whole repo
-	Refresh   key.Binding // r — refresh
-	Layout    key.Binding // tab — cycle layout
-	Quit      key.Binding // q / ctrl-c
-	Esc       key.Binding // esc — back / cancel
-	Note      key.Binding // n — add/edit note
+	Up         key.Binding // k / ↑
+	Down       key.Binding // j / ↓
+	Enter      key.Binding // enter — open in editor
+	Viewed     key.Binding // v — mark viewed
+	Toggle     key.Binding // t — diff/full toggle
+	Grep       key.Binding // / — grep changed files
+	FileList   key.Binding // f — back to file list
+	Peek       key.Binding // p — peek whole repo
+	Refresh    key.Binding // r — refresh
+	Zoom       key.Binding // z — zoom preview full-screen
+	Quit       key.Binding // q / ctrl-c
+	Esc        key.Binding // esc — back / cancel
+	Note       key.Binding // n — add/edit note
 	NotesList  key.Binding // N — view all notes
 	ViewedList key.Binding // V — view viewed files
-	Publish   key.Binding // P — publish PR review
-	Help      key.Binding // H — help popup
-	FocusNext key.Binding // l — focus preview pane
-	FocusPrev key.Binding // h — focus list pane
-	// inside note editor / grep prompt
-	Submit    key.Binding // ctrl-s — save note
-	GrepExec  key.Binding // ctrl-g — execute grep from prompt
-	FileListC key.Binding // ctrl-f — file list from grep prompt
+	Publish    key.Binding // P — publish PR review
+	Help       key.Binding // H — help popup
+	FocusNext  key.Binding // l — focus preview pane
+	FocusPrev  key.Binding // h — focus list pane
+	// typing-mode bindings (grep prompt, note editor)
+	Submit   key.Binding // ctrl-s — save note
+	GrepExec key.Binding // enter — execute grep
 }
 
 var keys = keyMap{
@@ -67,9 +66,9 @@ var keys = keyMap{
 		key.WithKeys("r"),
 		key.WithHelp("r", "refresh"),
 	),
-	Layout: key.NewBinding(
-		key.WithKeys("tab"),
-		key.WithHelp("tab", "layout"),
+	Zoom: key.NewBinding(
+		key.WithKeys("z"),
+		key.WithHelp("z", "zoom preview"),
 	),
 	Quit: key.NewBinding(
 		key.WithKeys("ctrl+c", "q"),
@@ -107,7 +106,6 @@ var keys = keyMap{
 		key.WithKeys("h"),
 		key.WithHelp("h", "focus list"),
 	),
-	// typing-mode bindings (grep prompt, note editor)
 	Submit: key.NewBinding(
 		key.WithKeys("ctrl+s"),
 		key.WithHelp("ctrl-s", "save"),
@@ -115,9 +113,5 @@ var keys = keyMap{
 	GrepExec: key.NewBinding(
 		key.WithKeys("enter"),
 		key.WithHelp("enter", "search"),
-	),
-	FileListC: key.NewBinding(
-		key.WithKeys("esc"),
-		key.WithHelp("esc", "cancel"),
 	),
 }

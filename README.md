@@ -72,7 +72,7 @@ wake --pr https://github.com/owner/repo/pull/42
 | `ctrl-p` | Peek — fuzzy-find any file in the repo, `esc` to return |
 | `ctrl-r` | Refresh |
 | `ctrl-s` | Publish notes as PR review (`--pr` mode only) |
-| `ctrl-/` | Cycle preview layout (right → bottom → hidden) |
+| `z` | Zoom preview full-screen (toggle) |
 | `↑/k` `↓/j` | Navigate |
 | `q` | Quit |
 
@@ -111,6 +111,7 @@ editor         = "nvim"
 preview        = "diff"       # "diff" or "full" — default view mode
 preview_width  = 62           # preview pane width, percent
 sort           = "alpha"      # "alpha" or "mtime"
+layout         = "right"      # "right" | "bottom" | "hidden"
 exclude        = ["*.lock", "dist/**", "*.snap"]
 ```
 
@@ -124,6 +125,7 @@ All keys and their defaults:
 | `preview` | `diff` | Default preview mode |
 | `preview_width` | `62` | Preview pane width (percent) |
 | `sort` | `alpha` | `alpha` or `mtime` (most recently modified first) |
+| `layout` | `right` | `right`, `bottom`, or `hidden` |
 | `exclude` | — | Glob patterns to hide from the list |
 
 ## Editor setup

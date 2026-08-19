@@ -80,6 +80,7 @@ type Model struct {
 	previewClickedRow   int      // visual row last clicked (-1 = none)
 	previewClickedLine  int      // file line parsed from clicked row (0 = unknown)
 	layout              previewLayout
+	zoomed              bool // z key: full-screen preview (hides list)
 	full                bool
 
 	// peek
@@ -132,20 +133,21 @@ func New(root, since string, cfg config.Config, pr *gh.PR) Model {
 	ta.SetHeight(8)
 
 	return Model{
-		mode:               ModeList,
-		focus:              focusList,
-		viewed:             make(map[string]string),
-		notes:              make(map[string]gh.Note),
-		query:              qi,
-		peekQuery:          pi,
-		noteTA:             ta,
-		cfg:                cfg,
-		root:               root,
-		since:              since,
-		full:               cfg.Preview == "full",
-		pr:                 pr,
-		prLoading:          pr != nil,
-		previewClickedRow:  -1,
+		mode:              ModeList,
+		focus:             focusList,
+		viewed:            make(map[string]string),
+		notes:             make(map[string]gh.Note),
+		query:             qi,
+		peekQuery:         pi,
+		noteTA:            ta,
+		cfg:               cfg,
+		root:              root,
+		since:             since,
+		full:              cfg.Preview == "full",
+		layout:            layoutFromConfig(cfg.Layout),
+		pr:                pr,
+		prLoading:         pr != nil,
+		previewClickedRow: -1,
 	}
 }
 
@@ -278,7 +280,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Enter):
 		return m.handleEnter()
 	case key.Matches(msg, keys.FocusNext):
-		if m.layout != layoutHidden {
+		if m.layout != layoutHidden && !m.zoomed {
 			m.focus = focusPreview
 			m.previewScrollOffset = 0
 		}
@@ -297,11 +299,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.prLoading = true
 		}
 		return m, m.reloadListCmd()
-	case key.Matches(msg, keys.Layout):
-		m.layout = m.layout.next()
-		if m.layout == layoutHidden {
+	case key.Matches(msg, keys.Zoom):
+		m.zoomed = !m.zoomed
+		if m.zoomed {
+			m.focus = focusPreview
+		} else {
 			m.focus = focusList
 		}
+		return m, nil
 		return m, nil
 	case key.Matches(msg, keys.Grep):
 		return m.handleGrepOpen()
@@ -372,8 +377,8 @@ func (m Model) handlePeekKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m, loadPeekItems(m.root)
 	case key.Matches(msg, keys.FileList):
 		return m.handleFileList()
-	case key.Matches(msg, keys.Layout):
-		m.layout = m.layout.next()
+	case key.Matches(msg, keys.Zoom):
+		m.zoomed = !m.zoomed
 		return m, nil
 	case key.Matches(msg, keys.Grep):
 		q := m.peekQuery.Value()
@@ -1004,6 +1009,12 @@ func (m Model) View() string {
 		usable = 1
 	}
 
+	// z zoomed: full-screen preview
+	if m.zoomed {
+		prev := m.renderPreviewPane(m.width, usable)
+		return lipgloss.JoinVertical(lipgloss.Left, header, prev, footer)
+	}
+
 	switch m.layout {
 	case layoutRight:
 		return m.renderSideBySide(header, footer, usable)
@@ -1073,7 +1084,7 @@ const helpText = `
 
  ── View ─────────────────────────────────────────────────
   t          toggle diff / whole-file view
-  tab        cycle preview layout (right → bottom → hidden)
+  z          zoom preview full-screen (toggle)
 
  ── Search ───────────────────────────────────────────────
   /          grep changed files  (enter to search, esc cancel)
@@ -1500,7 +1511,9 @@ func (m Model) renderHeader() string {
 
 	// pane focus indicator
 	focusIndicator := ""
-	if m.focus == focusPreview {
+	if m.zoomed {
+		focusIndicator = lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Bold(true).Render(" [zoom]")
+	} else if m.focus == focusPreview {
 		focusIndicator = lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Render(" [preview]")
 	}
 
@@ -1527,7 +1540,15 @@ func (m Model) renderFooter() string {
 		if m.full {
 			toggle = "full/diff"
 		}
-		if m.focus == focusPreview {
+		if m.zoomed {
+			noteHint := "n note"
+			if m.previewClickedLine > 0 {
+				noteHint = fmt.Sprintf("n note@line%d", m.previewClickedLine)
+			} else if m.previewClickedRow >= 0 {
+				noteHint = fmt.Sprintf("n note@row%d", m.previewClickedRow+1)
+			}
+			hints = fmt.Sprintf("j/k scroll · %s · z unzoom", noteHint)
+		} else if m.focus == focusPreview {
 			noteHint := "n note"
 			if m.previewClickedLine > 0 {
 				noteHint = fmt.Sprintf("n note@line%d", m.previewClickedLine)
@@ -1536,7 +1557,7 @@ func (m Model) renderFooter() string {
 			}
 			hints = fmt.Sprintf("j/k scroll · %s · h back to list", noteHint)
 		} else {
-			base := fmt.Sprintf("enter open · v viewed · V viewed-list · t %s · / grep · p peek · l preview · n note · N notes · r refresh · tab layout · H help", toggle)
+			base := fmt.Sprintf("enter open · v viewed · V viewed-list · t %s · / grep · p peek · l preview · z zoom · n note · N notes · r refresh · H help", toggle)
 			if m.pr != nil {
 				base += " · P publish"
 			}
@@ -1708,6 +1729,17 @@ func buildTreeRows(items []git.Item) []struct {
 		rows = append(rows, row{kind: 1, itemIndex: i})
 	}
 	return rows
+}
+
+func layoutFromConfig(s string) previewLayout {
+	switch s {
+	case "bottom":
+		return layoutBottom
+	case "hidden":
+		return layoutHidden
+	default:
+		return layoutRight
+	}
 }
 
 func scrollWindow(cursor, total, height int) (start, end int) {

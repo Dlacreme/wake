@@ -21,6 +21,7 @@ type Config struct {
 	Preview       string   `toml:"preview"`       // "diff" | "full"
 	PreviewWidth  int      `toml:"preview_width"` // percent of terminal width
 	Sort          string   `toml:"sort"`          // "alpha" | "mtime"
+	Layout        string   `toml:"layout"`        // "right" | "bottom" | "hidden"
 	Exclude       []string `toml:"exclude"`       // glob patterns
 }
 
@@ -30,6 +31,7 @@ func defaults() Config {
 		Preview:      "diff",
 		PreviewWidth: 62,
 		Sort:         "alpha",
+		Layout:       "right",
 	}
 }
 
@@ -93,6 +95,9 @@ func merge(cfg *Config, path string) error {
 	}
 	if file.Sort != "" {
 		cfg.Sort = file.Sort
+	}
+	if file.Layout != "" {
+		cfg.Layout = file.Layout
 	}
 	if len(file.Exclude) > 0 {
 		cfg.Exclude = file.Exclude
