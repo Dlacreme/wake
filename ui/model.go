@@ -123,6 +123,7 @@ func New(root, since string, cfg config.Config, pr *gh.PR) Model {
 		since:     since,
 		full:      cfg.Preview == "full",
 		pr:        pr,
+		prLoading: pr != nil,
 	}
 }
 
@@ -877,11 +878,14 @@ func (m Model) renderList(width, height int) string {
 	cursor := m.activeCursor()
 
 	if len(items) == 0 {
-		empty := lipgloss.NewStyle().
+		msg := "  nothing changed"
+		if m.prLoading {
+			msg = "  loading PR…"
+		}
+		return lipgloss.NewStyle().
 			Width(width).Height(height).
 			Foreground(lipgloss.Color("240")).
-			Render("  nothing changed")
-		return empty
+			Render(msg)
 	}
 
 	start, end := scrollWindow(cursor, len(items), height)
