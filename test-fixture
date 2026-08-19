@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+#
+# test-fixture — build a scratch repo covering all 6 change states for
+# interactive wake keybind verification. Run once, then: cd /tmp/wake-fixture && wake
+#
+# Change states produced:
+#   M  unstaged edit     modified.txt
+#   M  staged edit       staged.txt
+#   A  untracked new     untracked.txt
+#   A  staged new        new-staged.txt
+#   D  deletion          deleted.txt
+#   R  rename            old-name.txt → new-name.txt
+#
+# Also includes a path with spaces ("file with spaces.txt") and a file deep in
+# a subdirectory (lib/service.txt) so peek can demonstrate whole-repo navigation.
+#
+set -euo pipefail
+
+FIXTURE="${1:-/tmp/wake-fixture}"
+
+if [ -d "$FIXTURE" ]; then
+  printf 'removing existing fixture at %s\n' "$FIXTURE"
+  rm -rf "$FIXTURE"
+fi
+
+mkdir -p "$FIXTURE"
+cd "$FIXTURE"
+git init -q
+git config user.email "test@wake"
+git config user.name  "wake-test"
+
+# ── base commit ────────────────────────────────────────────────────────────────
+
+mkdir -p lib
+printf 'original line\nsecond line\nthird line\n' > modified.txt
+printf 'line one\nline two\n'                      > staged.txt
+printf 'content to delete\n'                       > deleted.txt
+printf 'original name\n'                           > old-name.txt
+printf 'spaces are fine\n'                         > "file with spaces.txt"
+printf 'func doThing() {\n  return nil\n}\n'       > lib/service.txt
+
+git add .
+git commit -q -m "base: all files"
+
+# ── working tree changes ────────────────────────────────────────────────────────
+
+# M unstaged
+printf 'changed line\nsecond line\nthird line\n' > modified.txt
+
+# M staged
+printf 'line one\nline two (edited)\n' > staged.txt
+git add staged.txt
+
+# A untracked (not staged)
+printf 'brand new untracked file\n' > untracked.txt
+
+# A staged new file
+printf 'staged new file content\n' > new-staged.txt
+git add new-staged.txt
+
+# D deletion (staged)
+git rm -q deleted.txt
+
+# R rename (staged)
+git mv old-name.txt new-name.txt
+
+printf '\nFixture ready at %s\n' "$FIXTURE"
+printf 'All 6 states present:\n'
+git -c color.status=always status --short
+printf '\nKeybinds to verify:\n'
+printf '  enter     open in $EDITOR at first hunk\n'
+printf '  ctrl-d    toggle diff / whole-file view (re-press to restore diff)\n'
+printf '  ctrl-g    grep changed files (type a pattern first, then ctrl-g)\n'
+printf '  ctrl-f    return to file list from grep results\n'
+printf '  ctrl-p    nested peek (esc returns to exact position)\n'
+printf '  ctrl-r    refresh list\n'
+printf '  ctrl-/    cycle preview layout: right → bottom → hidden → right\n'
+printf '\nRun:\n  cd %s && %s/wake\n' "$FIXTURE" "$(cd "$(dirname "$0")" && pwd)"
