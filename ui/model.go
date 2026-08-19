@@ -242,7 +242,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if isModePeek {
 			return m, loadPeekItems(m.root)
 		}
-		return m, loadItems(m.root, m.since, m.cfg.Exclude, m.cfg.Sort)
+		if m.pr != nil {
+			m.prLoading = true
+		}
+		return m, m.reloadListCmd()
 
 	case key.Matches(msg, keys.Layout):
 		m.layout = m.layout.next()
@@ -395,7 +398,7 @@ func (m Model) handleEsc() (Model, tea.Cmd) {
 	case ModeGrep:
 		m.mode = ModeList
 		m.query.SetValue("")
-		return m, loadItems(m.root, m.since, m.cfg.Exclude, m.cfg.Sort)
+		return m, m.reloadListCmd()
 	case ModeNotesList:
 		m.mode = ModeList
 		return m, m.refreshPreviewCmd()
@@ -450,7 +453,7 @@ func (m Model) handleFileList() (Model, tea.Cmd) {
 	}
 	m.mode = ModeList
 	m.query.SetValue("")
-	return m, loadItems(m.root, m.since, m.cfg.Exclude, m.cfg.Sort)
+	return m, m.reloadListCmd()
 }
 
 func (m Model) handlePeekOpen() (Model, tea.Cmd) {
@@ -522,6 +525,15 @@ func (m *Model) filterViewed(items []git.Item) []git.Item {
 }
 
 // ── async commands ────────────────────────────────────────────────────────────
+
+// reloadListCmd returns the right reload command depending on whether
+// we're in PR mode (reload from gh) or local mode (reload from git).
+func (m Model) reloadListCmd() tea.Cmd {
+	if m.pr != nil {
+		return loadPR(m.pr)
+	}
+	return loadItems(m.root, m.since, m.cfg.Exclude, m.cfg.Sort)
+}
 
 func loadItems(root, since string, exclude []string, sortOrder string) tea.Cmd {
 	return func() tea.Msg {
