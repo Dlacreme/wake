@@ -3,18 +3,22 @@ package ui
 import "github.com/charmbracelet/bubbles/key"
 
 type keyMap struct {
-	Up       key.Binding
-	Down     key.Binding
-	Enter    key.Binding
-	Viewed   key.Binding // v — mark file viewed
-	Toggle   key.Binding // ctrl-d — diff/full
-	Grep     key.Binding // ctrl-g
-	FileList key.Binding // ctrl-f
-	Peek     key.Binding // ctrl-p
-	Refresh  key.Binding // ctrl-r
-	Layout   key.Binding // ctrl-/
-	Quit     key.Binding // ctrl-c / q
-	Esc      key.Binding
+	Up        key.Binding
+	Down      key.Binding
+	Enter     key.Binding
+	Viewed    key.Binding // v — mark file viewed
+	Toggle    key.Binding // ctrl-d — diff/full
+	Grep      key.Binding // ctrl-g
+	FileList  key.Binding // ctrl-f
+	Peek      key.Binding // ctrl-p
+	Refresh   key.Binding // ctrl-r
+	Layout    key.Binding // ctrl-/
+	Quit      key.Binding // ctrl-c / q
+	Esc       key.Binding
+	Note      key.Binding // n — add/edit note on current file
+	NotesList key.Binding // N — view all pending notes
+	Publish   key.Binding // ctrl-s — publish notes as PR review
+	Submit    key.Binding // ctrl-s inside note editor — save note
 }
 
 var keys = keyMap{
@@ -65,5 +69,21 @@ var keys = keyMap{
 	Esc: key.NewBinding(
 		key.WithKeys("esc"),
 		key.WithHelp("esc", "back"),
+	),
+	Note: key.NewBinding(
+		key.WithKeys("n"),
+		key.WithHelp("n", "note"),
+	),
+	NotesList: key.NewBinding(
+		key.WithKeys("N"),
+		key.WithHelp("N", "all notes"),
+	),
+	Publish: key.NewBinding(
+		key.WithKeys("ctrl+s"),
+		key.WithHelp("ctrl-s", "publish review"),
+	),
+	Submit: key.NewBinding(
+		key.WithKeys("ctrl+s"),
+		key.WithHelp("ctrl-s", "save note"),
 	),
 }

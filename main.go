@@ -3,9 +3,11 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/Dlacreme/wake/config"
+	"github.com/Dlacreme/wake/gh"
 	"github.com/Dlacreme/wake/git"
 	"github.com/Dlacreme/wake/ui"
 )
@@ -13,30 +15,35 @@ import (
 const usage = `wake — review a changeset you didn't write
 
 Usage:
-  wake                   changes vs HEAD (staged + unstaged + untracked)
-  wake --since <ref>     everything on this branch since <ref>
-  wake --since HEAD~3    last three commits plus working tree
+  wake                          changes vs HEAD (staged + unstaged + untracked)
+  wake --since <ref>            everything on this branch since <ref>
+  wake --since HEAD~3           last three commits plus working tree
+  wake --pr <number>            review a GitHub PR by number
+  wake --pr <url>               review a GitHub PR by URL
 
 Keys:
-  enter     open in $EDITOR at the first changed hunk
-  v         mark file viewed (hides it until its diff changes)
-  ctrl-d    toggle diff / whole-file view
-  ctrl-g    grep the changed files only
-  ctrl-f    back to the changed-file list
-  ctrl-p    peek: fuzzy-find any file in the repo
-  ctrl-r    refresh
-  ctrl-/    cycle preview layout
+  enter       open in $EDITOR at the first changed hunk
+  v           mark file viewed (hides it until its diff changes)
+  n           add/edit a note on the current file
+  N           view all pending notes
+  ctrl-d      toggle diff / whole-file view
+  ctrl-g      grep the changed files only
+  ctrl-f      back to the changed-file list
+  ctrl-p      peek: fuzzy-find any file in the repo
+  ctrl-r      refresh
+  ctrl-s      publish notes as PR review (--pr mode only)
+  ctrl-/      cycle preview layout
   q / ctrl-c  quit
 
 Config files (flat TOML):
   ~/.config/wake/config.toml   user-level
   .wake.toml                   project-level (repo root)
 
-Keys: editor, editor_line_fmt, since, preview, preview_width, sort, exclude
+Config keys: editor, editor_line_fmt, since, preview, preview_width, sort, exclude
 `
 
 func main() {
-	since, showHelp := parseArgs(os.Args[1:])
+	since, prRef, showHelp := parseArgs(os.Args[1:])
 
 	if showHelp {
 		fmt.Print(usage)
@@ -50,7 +57,7 @@ func main() {
 
 	cfg := config.Load(root)
 
-	// CLI --since overrides config/env
+	// CLI flags override config/env
 	if since != "" {
 		cfg.Since = since
 	}
@@ -63,12 +70,22 @@ func main() {
 		}
 	}
 
-	// fast-path: nothing changed?
+	// validate git.ChangedItems can run (error early on bad state)
 	if _, err := git.ChangedItems(root, since, cfg.Exclude, cfg.Sort); err != nil {
 		die(err.Error())
 	}
 
-	m := ui.New(root, since, cfg)
+	// parse PR ref if provided
+	var pr *gh.PR
+	if prRef != "" {
+		parsed, err := gh.Parse(prRef, root)
+		if err != nil {
+			die(err.Error())
+		}
+		pr = &parsed
+	}
+
+	m := ui.New(root, since, cfg, pr)
 	p := tea.NewProgram(m,
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
@@ -78,28 +95,35 @@ func main() {
 	}
 }
 
-func parseArgs(args []string) (since string, help bool) {
+func parseArgs(args []string) (since, prRef string, help bool) {
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "-h", "--help":
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
 			help = true
-		case "--since":
+		case arg == "--since":
 			if i+1 < len(args) {
 				since = args[i+1]
 				i++
 			} else {
 				die("--since requires a ref argument")
 			}
-		default:
-			// handle --since=ref
-			if len(args[i]) > 8 && args[i][:8] == "--since=" {
-				since = args[i][8:]
+		case strings.HasPrefix(arg, "--since="):
+			since = arg[len("--since="):]
+		case arg == "--pr":
+			if i+1 < len(args) {
+				prRef = args[i+1]
+				i++
 			} else {
-				die("unknown option: " + args[i] + " (try --help)")
+				die("--pr requires a PR number or URL")
 			}
+		case strings.HasPrefix(arg, "--pr="):
+			prRef = arg[len("--pr="):]
+		default:
+			die("unknown option: " + arg + " (try --help)")
 		}
 	}
-	return since, help
+	return since, prRef, help
 }
 
 func die(msg string) {

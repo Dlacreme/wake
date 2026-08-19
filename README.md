@@ -45,9 +45,11 @@ make install   # runs go install, puts wake in ~/go/bin
 ## Usage
 
 ```bash
-wake                  # staged + unstaged + untracked vs HEAD
-wake --since main     # everything on this branch since main
-wake --since HEAD~3   # last three commits plus working tree
+wake                          # staged + unstaged + untracked vs HEAD
+wake --since main             # everything on this branch since main
+wake --since HEAD~3           # last three commits plus working tree
+wake --pr 42                  # review GitHub PR #42
+wake --pr https://github.com/owner/repo/pull/42
 ```
 
 ## Keys
@@ -56,14 +58,36 @@ wake --since HEAD~3   # last three commits plus working tree
 |-----|--------|
 | `enter` | Open in `$EDITOR` at the first changed hunk |
 | `v` | Mark viewed — hides the file until its diff changes |
+| `n` | Add/edit a note on the current file |
+| `N` | View all pending notes |
 | `ctrl-d` | Toggle diff / whole-file view |
 | `ctrl-g` | Grep the changed files only |
 | `ctrl-f` | Back to the changed-file list |
 | `ctrl-p` | Peek — fuzzy-find any file in the repo, `esc` to return |
 | `ctrl-r` | Refresh |
+| `ctrl-s` | Publish notes as PR review (`--pr` mode only) |
 | `ctrl-/` | Cycle preview layout (right → bottom → hidden) |
 | `↑/k` `↓/j` | Navigate |
 | `q` | Quit |
+
+## PR review
+
+`--pr` requires the [GitHub CLI](https://cli.github.com) (`gh`). If not yet authenticated:
+
+```bash
+brew install gh
+gh auth login
+```
+
+Then:
+
+```bash
+wake --pr 42
+# or
+wake --pr https://github.com/owner/repo/pull/42
+```
+
+Wake fetches the PR diff and existing review comments, showing them inline below each file's diff. Press `n` to write a note on any file, `N` to review all notes, `ctrl-s` to publish as a GitHub PR review. Notes with a line number (from grep hits) are posted as inline comments; file-level notes go in the review body.
 
 ## Config
 

@@ -8,11 +8,13 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/Dlacreme/wake/config"
 	"github.com/Dlacreme/wake/git"
+	"github.com/Dlacreme/wake/gh"
 	"github.com/sahilm/fuzzy"
 )
 
@@ -21,10 +23,12 @@ import (
 type Mode int
 
 const (
-	ModeList     Mode = iota // changed-file list
-	ModeGrep                 // grep results for changed files
-	ModePeek                 // whole-repo file list
-	ModePeekGrep             // grep results for whole repo
+	ModeList      Mode = iota // changed-file list
+	ModeGrep                  // grep results for changed files
+	ModePeek                  // whole-repo file list
+	ModePeekGrep              // grep results for whole repo
+	ModeNote                  // note editor overlay
+	ModeNotesList             // view all pending notes
 )
 
 // ── messages ──────────────────────────────────────────────────────────────────
@@ -33,6 +37,12 @@ type itemsLoadedMsg struct{ items []git.Item }
 type previewReadyMsg struct{ content string }
 type editorDoneMsg struct{}
 type errMsg struct{ err error }
+type prLoadedMsg struct {
+	pr       gh.PR
+	comments []gh.ReviewComment
+	fullDiff string
+}
+type publishDoneMsg struct{ err error }
 
 // ── model ─────────────────────────────────────────────────────────────────────
 
@@ -52,11 +62,12 @@ type Model struct {
 	full    bool // diff=false / full-file=true
 
 	// peek sub-state (saved/restored on ctrl-p / esc)
-	peekItems        []git.Item
-	peekCursor       int
-	peekQuery        textinput.Model
-	savedListCursor  int
-	savedListItems   []git.Item
+	peekItems       []git.Item
+	peekCursor      int
+	peekQuery       textinput.Model
+	savedListCursor int
+	savedListItems  []git.Item
+	savedMode       Mode
 
 	// dimensions
 	width  int
@@ -67,12 +78,24 @@ type Model struct {
 	root  string
 	since string // --since value (empty = HEAD)
 
+	// PR mode
+	pr           *gh.PR            // nil when not in PR mode
+	prComments   []gh.ReviewComment // existing comments from GitHub
+	prFullDiff   string             // full unified diff from gh pr diff
+	prLoading    bool
+
+	// notes (session-only; publishable if pr != nil)
+	notes     map[string]gh.Note // key: path (one note per file for now)
+	noteTA    textarea.Model     // the active textarea when ModeNote
+	notePath  string             // file being noted
+	noteLine  int                // line (0 = file-level)
+
 	// status line message (transient)
 	statusMsg string
 }
 
 // New creates the initial model.
-func New(root, since string, cfg config.Config) Model {
+func New(root, since string, cfg config.Config, pr *gh.PR) Model {
 	qi := textinput.New()
 	qi.Placeholder = ""
 	qi.Prompt = ""
@@ -81,22 +104,35 @@ func New(root, since string, cfg config.Config) Model {
 	pi.Placeholder = ""
 	pi.Prompt = ""
 
+	ta := textarea.New()
+	ta.Placeholder = "Write your note… (ctrl-s to save, esc to cancel)"
+	ta.ShowLineNumbers = false
+	ta.SetWidth(80)
+	ta.SetHeight(8)
+
 	return Model{
 		mode:      ModeList,
 		viewed:    make(map[string]string),
+		notes:     make(map[string]gh.Note),
 		query:     qi,
 		peekQuery: pi,
+		noteTA:    ta,
 		cfg:       cfg,
 		root:      root,
 		since:     since,
 		full:      cfg.Preview == "full",
+		pr:        pr,
 	}
 }
 
 // ── Bubble Tea interface ───────────────────────────────────────────────────────
 
 func (m Model) Init() tea.Cmd {
-	return loadItems(m.root, m.since, m.cfg.Exclude, m.cfg.Sort)
+	cmds := []tea.Cmd{loadItems(m.root, m.since, m.cfg.Exclude, m.cfg.Sort)}
+	if m.pr != nil {
+		cmds = append(cmds, loadPR(m.pr))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -105,12 +141,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.noteTA.SetWidth(m.width - 4)
 		return m, m.refreshPreviewCmd()
 
 	case itemsLoadedMsg:
 		switch m.mode {
 		case ModeList, ModeGrep:
-			// filter out viewed (unless diff changed)
 			m.items = m.filterViewed(msg.items)
 			m.clampCursor()
 		case ModePeek, ModePeekGrep:
@@ -118,6 +154,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.clampPeekCursor()
 		}
 		return m, m.refreshPreviewCmd()
+
+	case prLoadedMsg:
+		m.prLoading = false
+		if m.pr != nil {
+			*m.pr = msg.pr
+		}
+		m.prComments = msg.comments
+		m.prFullDiff = msg.fullDiff
+		m.statusMsg = fmt.Sprintf("PR #%d: %s", msg.pr.Number, msg.pr.Title)
+		return m, m.refreshPreviewCmd()
+
+	case publishDoneMsg:
+		if msg.err != nil {
+			m.statusMsg = "publish failed: " + msg.err.Error()
+		} else {
+			m.statusMsg = fmt.Sprintf("review published on PR #%d", m.pr.Number)
+			m.notes = make(map[string]gh.Note)
+		}
+		return m, nil
 
 	case previewReadyMsg:
 		m.preview = msg.content
@@ -138,7 +193,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// typing always feeds the query input
+	// note editor captures all keys except save/cancel
+	if m.mode == ModeNote {
+		return m.handleNoteKey(msg)
+	}
+
 	isModePeek := m.mode == ModePeek || m.mode == ModePeekGrep
 
 	switch {
@@ -158,7 +217,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleEnter()
 
 	case key.Matches(msg, keys.Viewed):
-		if !isModePeek {
+		if !isModePeek && m.mode != ModeNotesList {
 			return m.markViewed()
 		}
 
@@ -186,16 +245,33 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleFileList()
 
 	case key.Matches(msg, keys.Peek):
-		if !isModePeek {
+		if !isModePeek && m.mode != ModeNotesList {
 			return m.handlePeekOpen()
 		}
 
+	case key.Matches(msg, keys.Note):
+		if !isModePeek {
+			return m.handleNoteOpen()
+		}
+
+	case key.Matches(msg, keys.NotesList):
+		if !isModePeek {
+			return m.handleNotesList()
+		}
+
+	case key.Matches(msg, keys.Publish):
+		if m.pr != nil && len(m.notes) > 0 {
+			return m, publishNotes(m.pr, m.notesSlice(), m.prFullDiff)
+		} else if m.pr != nil {
+			m.statusMsg = "no notes to publish"
+		} else {
+			m.statusMsg = "not in PR mode (use --pr)"
+		}
+
 	default:
-		// feed key to the active query input
 		var cmd tea.Cmd
 		if isModePeek {
 			m.peekQuery, cmd = m.peekQuery.Update(msg)
-			// live fuzzy filter in peek file-list mode
 			if m.mode == ModePeek {
 				m.filterPeekByQuery()
 				m.clampPeekCursor()
@@ -203,7 +279,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		} else {
 			m.query, cmd = m.query.Update(msg)
-			// live fuzzy filter in list mode
 			if m.mode == ModeList {
 				m.filterListByQuery()
 				m.clampCursor()
@@ -214,6 +289,77 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// ── note editor ───────────────────────────────────────────────────────────────
+
+func (m Model) handleNoteOpen() (Model, tea.Cmd) {
+	item := m.selectedItem()
+	if item == nil {
+		return m, nil
+	}
+	m.notePath = item.Path
+	m.noteLine = item.Line
+
+	// pre-fill with existing note if any
+	if existing, ok := m.notes[item.Path]; ok {
+		m.noteTA.SetValue(existing.Body)
+	} else {
+		m.noteTA.SetValue("")
+	}
+	m.noteTA.Focus()
+	m.savedMode = m.mode
+	m.mode = ModeNote
+	return m, textarea.Blink
+}
+
+func (m Model) handleNoteKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, keys.Submit):
+		body := strings.TrimSpace(m.noteTA.Value())
+		if body != "" {
+			m.notes[m.notePath] = gh.Note{
+				Path: m.notePath,
+				Line: m.noteLine,
+				Body: body,
+			}
+			m.statusMsg = fmt.Sprintf("note saved: %s", m.notePath)
+		} else {
+			// empty note = delete
+			delete(m.notes, m.notePath)
+			m.statusMsg = fmt.Sprintf("note removed: %s", m.notePath)
+		}
+		m.mode = m.savedMode
+		m.noteTA.Blur()
+		return m, m.refreshPreviewCmd()
+
+	case key.Matches(msg, keys.Esc):
+		m.mode = m.savedMode
+		m.noteTA.Blur()
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.noteTA, cmd = m.noteTA.Update(msg)
+	return m, cmd
+}
+
+func (m Model) handleNotesList() (Model, tea.Cmd) {
+	if m.mode == ModeNotesList {
+		m.mode = ModeList
+		return m, m.refreshPreviewCmd()
+	}
+	m.savedMode = m.mode
+	m.mode = ModeNotesList
+	return m, nil
+}
+
+func (m Model) notesSlice() []gh.Note {
+	out := make([]gh.Note, 0, len(m.notes))
+	for _, n := range m.notes {
+		out = append(out, n)
+	}
+	return out
 }
 
 // ── navigation ────────────────────────────────────────────────────────────────
@@ -231,7 +377,6 @@ func (m Model) moveCursor(delta int) (Model, tea.Cmd) {
 func (m Model) handleEsc() (Model, tea.Cmd) {
 	switch m.mode {
 	case ModePeek, ModePeekGrep:
-		// restore list state
 		m.mode = ModeList
 		m.cursor = m.savedListCursor
 		m.items = m.savedListItems
@@ -241,6 +386,9 @@ func (m Model) handleEsc() (Model, tea.Cmd) {
 		m.mode = ModeList
 		m.query.SetValue("")
 		return m, loadItems(m.root, m.since, m.cfg.Exclude, m.cfg.Sort)
+	case ModeNotesList:
+		m.mode = ModeList
+		return m, m.refreshPreviewCmd()
 	}
 	return m, nil
 }
@@ -260,7 +408,6 @@ func (m Model) markViewed() (Model, tea.Cmd) {
 	}
 	hash := git.DiffHash(m.root, m.since, item.Path)
 	m.viewed[item.Path] = hash
-	// remove from current list
 	newItems := make([]git.Item, 0, len(m.items)-1)
 	for _, it := range m.items {
 		if it.Path != item.Path {
@@ -307,8 +454,6 @@ func (m Model) handlePeekOpen() (Model, tea.Cmd) {
 
 // ── fuzzy filtering ───────────────────────────────────────────────────────────
 
-// allChangedItems caches the unfiltered list across query changes.
-// We reload from git on ctrl-r; during typing we fuzzy-filter this slice.
 var cachedChangedItems []git.Item
 var cachedPeekItems []git.Item
 
@@ -348,7 +493,6 @@ func (m *Model) filterPeekByQuery() {
 	m.peekItems = filtered
 }
 
-// filterViewed removes items whose diff hash matches the viewed hash.
 func (m *Model) filterViewed(items []git.Item) []git.Item {
 	if len(m.viewed) == 0 {
 		return items
@@ -358,9 +502,9 @@ func (m *Model) filterViewed(items []git.Item) []git.Item {
 		if h, ok := m.viewed[it.Path]; ok {
 			current := git.DiffHash(m.root, m.since, it.Path)
 			if current == h {
-				continue // same diff → still hidden
+				continue
 			}
-			delete(m.viewed, it.Path) // changed → reappear
+			delete(m.viewed, it.Path)
 		}
 		out = append(out, it)
 	}
@@ -411,6 +555,30 @@ func grepAll(root, query string) tea.Cmd {
 	}
 }
 
+func loadPR(pr *gh.PR) tea.Cmd {
+	return func() tea.Msg {
+		if err := gh.Fetch(pr); err != nil {
+			return errMsg{err}
+		}
+		comments, err := gh.Comments(*pr)
+		if err != nil {
+			return errMsg{err}
+		}
+		fullDiff, err := gh.Diff(*pr)
+		if err != nil {
+			return errMsg{err}
+		}
+		return prLoadedMsg{pr: *pr, comments: comments, fullDiff: fullDiff}
+	}
+}
+
+func publishNotes(pr *gh.PR, notes []gh.Note, fullDiff string) tea.Cmd {
+	return func() tea.Msg {
+		err := gh.Publish(*pr, notes, fullDiff)
+		return publishDoneMsg{err: err}
+	}
+}
+
 func openEditor(root, since string, item git.Item, cfg config.Config) tea.Cmd {
 	path := item.Path
 	ln := item.Line
@@ -433,7 +601,6 @@ func openEditor(root, since string, item git.Item, cfg config.Config) tea.Cmd {
 	var args []string
 
 	if cfg.EditorLineFmt != "" {
-		// custom escape hatch
 		fmtStr := cfg.EditorLineFmt
 		fmtStr = strings.ReplaceAll(fmtStr, "{file}", full)
 		fmtStr = strings.ReplaceAll(fmtStr, "{line}", fmt.Sprintf("%d", ln))
@@ -473,8 +640,22 @@ func (m Model) refreshPreviewCmd() tea.Cmd {
 	full := m.full
 	w := m.previewWidth()
 	it := *item
+	comments := m.prComments
+	prFullDiff := m.prFullDiff
+	notes := m.notes
 	return func() tea.Msg {
 		content := renderPreview(root, since, it, full, w)
+		// append existing PR comments for this file
+		content = appendComments(content, it.Path, comments)
+		// append pending note for this file
+		content = appendNote(content, it.Path, notes)
+		// in PR mode, use the PR diff if local diff is empty
+		if content == "" && prFullDiff != "" {
+			fileDiff := gh.FileDiff(prFullDiff, it.Path)
+			if fileDiff != "" {
+				content = fileDiff
+			}
+		}
 		return previewReadyMsg{content}
 	}
 }
@@ -484,6 +665,16 @@ func (m Model) refreshPreviewCmd() tea.Cmd {
 func (m Model) View() string {
 	if m.width == 0 {
 		return ""
+	}
+
+	// note editor overlay
+	if m.mode == ModeNote {
+		return m.renderNoteEditor()
+	}
+
+	// notes list overlay
+	if m.mode == ModeNotesList {
+		return m.renderNotesList()
 	}
 
 	header := m.renderHeader()
@@ -504,9 +695,113 @@ func (m Model) View() string {
 	return ""
 }
 
+// ── note editor overlay ───────────────────────────────────────────────────────
+
+var styleOverlay = lipgloss.NewStyle().
+	Border(lipgloss.RoundedBorder()).
+	BorderForeground(lipgloss.Color("99")).
+	Padding(1, 2)
+
+func (m Model) renderNoteEditor() string {
+	title := fmt.Sprintf(" note: %s ", m.notePath)
+	if m.noteLine > 0 {
+		title = fmt.Sprintf(" note: %s:%d ", m.notePath, m.noteLine)
+	}
+	hint := styleFooter.Render("ctrl-s save · esc cancel")
+	box := styleOverlay.Render(
+		lipgloss.JoinVertical(lipgloss.Left,
+			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("99")).Render(title),
+			"",
+			m.noteTA.View(),
+			"",
+			hint,
+		),
+	)
+	// centre the box
+	bw := lipgloss.Width(box)
+	bh := lipgloss.Height(box)
+	padL := (m.width - bw) / 2
+	padT := (m.height - bh) / 2
+	if padL < 0 {
+		padL = 0
+	}
+	if padT < 0 {
+		padT = 0
+	}
+	top := strings.Repeat("\n", padT)
+	left := strings.Repeat(" ", padL)
+	var sb strings.Builder
+	sb.WriteString(top)
+	for _, line := range strings.Split(box, "\n") {
+		sb.WriteString(left)
+		sb.WriteString(line)
+		sb.WriteByte('\n')
+	}
+	return sb.String()
+}
+
+// ── notes list overlay ────────────────────────────────────────────────────────
+
+func (m Model) renderNotesList() string {
+	header := m.renderHeader()
+	footer := styleFooter.Width(m.width).Render("n edit · esc back" +
+		func() string {
+			if m.pr != nil {
+				return " · ctrl-s publish"
+			}
+			return ""
+		}())
+
+	usable := m.height - lipgloss.Height(header) - lipgloss.Height(footer)
+
+	var sb strings.Builder
+	if len(m.notes) == 0 {
+		sb.WriteString(lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")).
+			Render("  no notes yet — press n on any file"))
+	} else {
+		for path, note := range m.notes {
+			sb.WriteString(lipgloss.NewStyle().Bold(true).
+				Foreground(lipgloss.Color("99")).Render("  ● " + path))
+			if note.Line > 0 {
+				sb.WriteString(lipgloss.NewStyle().
+					Foreground(lipgloss.Color("240")).
+					Render(fmt.Sprintf(":%d", note.Line)))
+			}
+			sb.WriteByte('\n')
+			for _, line := range strings.Split(note.Body, "\n") {
+				sb.WriteString("    " + line + "\n")
+			}
+			sb.WriteByte('\n')
+		}
+	}
+
+	content := lipgloss.NewStyle().
+		Width(m.width).Height(usable).
+		Render(sb.String())
+
+	return lipgloss.JoinVertical(lipgloss.Left, header, content, footer)
+}
+
+// ── list pane ─────────────────────────────────────────────────────────────────
+
+var (
+	styleSelected = lipgloss.NewStyle().
+			Background(lipgloss.Color("237")).
+			Bold(true)
+
+	styleStatusM = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
+	styleStatusA = lipgloss.NewStyle().Foreground(lipgloss.Color("76")).Bold(true)
+	styleStatusD = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+	styleStatusR = lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Bold(true)
+	styleStatusG = lipgloss.NewStyle().Foreground(lipgloss.Color("165")).Bold(true)
+	styleStatusP = lipgloss.NewStyle().Foreground(lipgloss.Color("44")).Bold(true)
+	styleNote    = lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Bold(true)
+)
+
 func (m Model) renderSideBySide(header, footer string, usable int) string {
 	listW := m.listWidth()
-	prevW := m.width - listW - 1 // 1 for divider
+	prevW := m.width - listW - 1
 
 	list := m.renderList(listW, usable)
 	prev := m.renderPreviewPane(prevW, usable)
@@ -541,21 +836,6 @@ func (m Model) renderListOnly(header, footer string, usable int) string {
 	return lipgloss.JoinVertical(lipgloss.Left, header, list, footer)
 }
 
-// ── list pane ─────────────────────────────────────────────────────────────────
-
-var (
-	styleSelected = lipgloss.NewStyle().
-			Background(lipgloss.Color("237")).
-			Bold(true)
-
-	styleStatusM = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true) // yellow
-	styleStatusA = lipgloss.NewStyle().Foreground(lipgloss.Color("76")).Bold(true)  // green
-	styleStatusD = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true) // red
-	styleStatusR = lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Bold(true)  // blue
-	styleStatusG = lipgloss.NewStyle().Foreground(lipgloss.Color("165")).Bold(true) // magenta
-	styleStatusP = lipgloss.NewStyle().Foreground(lipgloss.Color("44")).Bold(true)  // cyan
-)
-
 func (m Model) renderList(width, height int) string {
 	items := m.activeItems()
 	cursor := m.activeCursor()
@@ -568,7 +848,6 @@ func (m Model) renderList(width, height int) string {
 		return empty
 	}
 
-	// scroll window
 	start, end := scrollWindow(cursor, len(items), height)
 
 	var sb strings.Builder
@@ -577,6 +856,12 @@ func (m Model) renderList(width, height int) string {
 		stStyle := statusStyle(it.Status)
 		st := stStyle.Render(it.Status)
 
+		// note marker
+		noteMark := ""
+		if _, hasNote := m.notes[it.Path]; hasNote {
+			noteMark = styleNote.Render("●") + " "
+		}
+
 		var label string
 		if it.Status == git.StatusGrep {
 			label = fmt.Sprintf("%s:%d  %s", it.Path, it.Line, truncate(it.Text, width-20))
@@ -584,7 +869,7 @@ func (m Model) renderList(width, height int) string {
 			label = it.Path
 		}
 
-		line := fmt.Sprintf("  %s  %s", st, label)
+		line := fmt.Sprintf("  %s  %s%s", st, noteMark, label)
 		line = truncate(line, width)
 		line = padRight(line, width)
 
@@ -595,7 +880,6 @@ func (m Model) renderList(width, height int) string {
 		sb.WriteByte('\n')
 	}
 
-	// pad remaining lines
 	rendered := sb.String()
 	lines := strings.Count(rendered, "\n")
 	for lines < height {
@@ -611,23 +895,19 @@ func (m Model) renderPreviewPane(width, height int) string {
 	content := m.preview
 	lines := strings.Split(content, "\n")
 
-	// trim to height
 	if len(lines) > height {
 		lines = lines[:height]
 	}
 
 	var sb strings.Builder
 	for _, line := range lines {
-		// strip ANSI before measuring, then re-render truncated
 		visible := stripANSI(line)
 		if len(visible) > width {
-			// truncate at visible width boundary
 			line = truncateANSI(line, width)
 		}
 		sb.WriteString(line)
 		sb.WriteByte('\n')
 	}
-	// pad
 	rendered := sb.String()
 	lineCount := strings.Count(rendered, "\n")
 	for lineCount < height {
@@ -635,6 +915,63 @@ func (m Model) renderPreviewPane(width, height int) string {
 		lineCount++
 	}
 	return rendered
+}
+
+// appendComments appends existing PR review comments for a file to the preview.
+func appendComments(preview, path string, comments []gh.ReviewComment) string {
+	var relevant []gh.ReviewComment
+	for _, c := range comments {
+		if c.Path == path {
+			relevant = append(relevant, c)
+		}
+	}
+	if len(relevant) == 0 {
+		return preview
+	}
+	var sb strings.Builder
+	sb.WriteString(preview)
+	sb.WriteString("\n")
+	sb.WriteString(lipgloss.NewStyle().
+		Foreground(lipgloss.Color("240")).
+		Render(strings.Repeat("─", 40)))
+	sb.WriteString("\n")
+	for _, c := range relevant {
+		header := lipgloss.NewStyle().Bold(true).
+			Foreground(lipgloss.Color("33")).
+			Render(fmt.Sprintf("  @%s", c.Author))
+		if c.Line > 0 {
+			header += lipgloss.NewStyle().
+				Foreground(lipgloss.Color("240")).
+				Render(fmt.Sprintf(" line %d", c.Line))
+		}
+		sb.WriteString(header + "\n")
+		for _, line := range strings.Split(c.Body, "\n") {
+			sb.WriteString("  " + line + "\n")
+		}
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// appendNote appends the pending local note for a file to the preview.
+func appendNote(preview, path string, notes map[string]gh.Note) string {
+	note, ok := notes[path]
+	if !ok {
+		return preview
+	}
+	var sb strings.Builder
+	sb.WriteString(preview)
+	sb.WriteString("\n")
+	sb.WriteString(lipgloss.NewStyle().
+		Foreground(lipgloss.Color("99")).
+		Render(strings.Repeat("─", 40)))
+	sb.WriteString("\n")
+	sb.WriteString(lipgloss.NewStyle().Bold(true).
+		Foreground(lipgloss.Color("99")).Render("  ● your note") + "\n")
+	for _, line := range strings.Split(note.Body, "\n") {
+		sb.WriteString("  " + line + "\n")
+	}
+	return sb.String()
 }
 
 // ── header / footer ───────────────────────────────────────────────────────────
@@ -656,13 +993,36 @@ var styleBrand = lipgloss.NewStyle().
 func (m Model) renderHeader() string {
 	prompt := m.promptLabel()
 	query := m.activeQuery()
+
+	// PR title in header when in PR mode
+	prLabel := ""
+	if m.pr != nil {
+		title := m.pr.Title
+		if title == "" {
+			title = fmt.Sprintf("PR #%d", m.pr.Number)
+		} else {
+			title = fmt.Sprintf("PR #%d: %s", m.pr.Number, title)
+		}
+		prLabel = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("33")).
+			Render(" [" + truncate(title, 50) + "]")
+	}
+
+	// note count badge
+	noteBadge := ""
+	if len(m.notes) > 0 {
+		noteBadge = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("99")).Bold(true).
+			Render(fmt.Sprintf(" ●%d", len(m.notes)))
+	}
+
 	count := fmt.Sprintf("%d/%d", m.activeCursor()+1, len(m.activeItems()))
 	if len(m.activeItems()) == 0 {
 		count = "0/0"
 	}
 	brand := styleBrand.Render("wake")
-	left := fmt.Sprintf("%s  %s", prompt, query)
-	right := fmt.Sprintf("%s  %s", count, brand)
+	left := fmt.Sprintf("%s  %s%s", prompt, query, prLabel)
+	right := fmt.Sprintf("%s%s  %s", count, noteBadge, brand)
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2
 	if gap < 1 {
 		gap = 1
@@ -674,7 +1034,6 @@ func (m Model) renderHeader() string {
 func (m Model) renderFooter() string {
 	if m.statusMsg != "" {
 		msg := m.statusMsg
-		m.statusMsg = "" // clear after render (cosmetic; Update will clear on next action)
 		return styleFooter.Width(m.width).Render(msg)
 	}
 
@@ -685,13 +1044,22 @@ func (m Model) renderFooter() string {
 		if m.full {
 			toggle = "full/diff"
 		}
-		hints = fmt.Sprintf("enter open · v viewed · ctrl-d %s · ctrl-g grep · ctrl-p peek · ctrl-r refresh · ctrl-/ layout", toggle)
+		base := fmt.Sprintf("enter open · v viewed · ctrl-d %s · ctrl-g grep · ctrl-p peek · n note · N notes · ctrl-r refresh · ctrl-/ layout", toggle)
+		if m.pr != nil {
+			base += " · ctrl-s publish"
+		}
+		hints = base
 	case ModeGrep:
-		hints = "enter open · v viewed · ctrl-f file list · ctrl-r refresh"
+		hints = "enter open · v viewed · n note · ctrl-f file list · ctrl-r refresh"
 	case ModePeek:
 		hints = "enter open · ctrl-g grep repo · ctrl-f file list · esc back"
 	case ModePeekGrep:
 		hints = "enter open · ctrl-f file list · esc back"
+	case ModeNotesList:
+		hints = "esc back"
+		if m.pr != nil {
+			hints += " · ctrl-s publish"
+		}
 	}
 	return styleFooter.Width(m.width).Render(hints)
 }
@@ -704,6 +1072,8 @@ func (m Model) promptLabel() string {
 		return "peek>"
 	case ModePeekGrep:
 		return "repo-grep>"
+	case ModeNotesList:
+		return "notes>"
 	default:
 		return "changed>"
 	}
@@ -831,7 +1201,6 @@ func padRight(s string, width int) string {
 	return s + strings.Repeat(" ", width-vis)
 }
 
-// stripANSI removes ANSI escape sequences for length measurement.
 func stripANSI(s string) string {
 	var out strings.Builder
 	i := 0
@@ -841,7 +1210,7 @@ func stripANSI(s string) string {
 			for i < len(s) && s[i] != 'm' {
 				i++
 			}
-			i++ // skip 'm'
+			i++
 			continue
 		}
 		out.WriteByte(s[i])
@@ -850,19 +1219,17 @@ func stripANSI(s string) string {
 	return out.String()
 }
 
-// truncateANSI truncates a string with ANSI codes to at most `max` visible chars.
 func truncateANSI(s string, max int) string {
 	var out strings.Builder
 	visible := 0
 	i := 0
 	for i < len(s) && visible < max {
 		if s[i] == '\033' && i+1 < len(s) && s[i+1] == '[' {
-			// copy the escape sequence verbatim
 			j := i + 2
 			for j < len(s) && s[j] != 'm' {
 				j++
 			}
-			j++ // include 'm'
+			j++
 			out.WriteString(s[i:j])
 			i = j
 			continue
@@ -873,3 +1240,4 @@ func truncateANSI(s string, max int) string {
 	}
 	return out.String()
 }
+
