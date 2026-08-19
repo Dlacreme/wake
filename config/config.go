@@ -20,7 +20,7 @@ type Config struct {
 	Since         string   `toml:"since"`
 	Preview       string   `toml:"preview"`       // "diff" | "full"
 	PreviewWidth  int      `toml:"preview_width"` // percent of terminal width
-	Sort          string   `toml:"sort"`          // "mtime" only for now
+	Sort          string   `toml:"sort"`          // "alpha" | "mtime"
 	Exclude       []string `toml:"exclude"`       // glob patterns
 }
 
@@ -29,7 +29,7 @@ func defaults() Config {
 		Editor:       "vim",
 		Preview:      "diff",
 		PreviewWidth: 62,
-		Sort:         "mtime",
+		Sort:         "alpha",
 	}
 }
 

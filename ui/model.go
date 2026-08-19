@@ -96,7 +96,7 @@ func New(root, since string, cfg config.Config) Model {
 // ── Bubble Tea interface ───────────────────────────────────────────────────────
 
 func (m Model) Init() tea.Cmd {
-	return loadItems(m.root, m.since, m.cfg.Exclude)
+	return loadItems(m.root, m.since, m.cfg.Exclude, m.cfg.Sort)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -173,7 +173,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if isModePeek {
 			return m, loadPeekItems(m.root)
 		}
-		return m, loadItems(m.root, m.since, m.cfg.Exclude)
+		return m, loadItems(m.root, m.since, m.cfg.Exclude, m.cfg.Sort)
 
 	case key.Matches(msg, keys.Layout):
 		m.layout = m.layout.next()
@@ -240,7 +240,7 @@ func (m Model) handleEsc() (Model, tea.Cmd) {
 	case ModeGrep:
 		m.mode = ModeList
 		m.query.SetValue("")
-		return m, loadItems(m.root, m.since, m.cfg.Exclude)
+		return m, loadItems(m.root, m.since, m.cfg.Exclude, m.cfg.Sort)
 	}
 	return m, nil
 }
@@ -282,7 +282,7 @@ func (m Model) handleGrep() (Model, tea.Cmd) {
 	}
 	m.mode = ModeGrep
 	m.items = nil
-	return m, grepChanged(m.root, m.since, q, m.cfg.Exclude)
+	return m, grepChanged(m.root, m.since, q, m.cfg.Exclude, m.cfg.Sort)
 }
 
 func (m Model) handleFileList() (Model, tea.Cmd) {
@@ -293,7 +293,7 @@ func (m Model) handleFileList() (Model, tea.Cmd) {
 	}
 	m.mode = ModeList
 	m.query.SetValue("")
-	return m, loadItems(m.root, m.since, m.cfg.Exclude)
+	return m, loadItems(m.root, m.since, m.cfg.Exclude, m.cfg.Sort)
 }
 
 func (m Model) handlePeekOpen() (Model, tea.Cmd) {
@@ -369,9 +369,9 @@ func (m *Model) filterViewed(items []git.Item) []git.Item {
 
 // ── async commands ────────────────────────────────────────────────────────────
 
-func loadItems(root, since string, exclude []string) tea.Cmd {
+func loadItems(root, since string, exclude []string, sortOrder string) tea.Cmd {
 	return func() tea.Msg {
-		items, err := git.ChangedItems(root, since, exclude)
+		items, err := git.ChangedItems(root, since, exclude, sortOrder)
 		if err != nil {
 			return errMsg{err}
 		}
@@ -391,9 +391,9 @@ func loadPeekItems(root string) tea.Cmd {
 	}
 }
 
-func grepChanged(root, since, query string, exclude []string) tea.Cmd {
+func grepChanged(root, since, query string, exclude []string, sortOrder string) tea.Cmd {
 	return func() tea.Msg {
-		items, err := git.GrepItems(root, since, query, exclude)
+		items, err := git.GrepItems(root, since, query, exclude, sortOrder)
 		if err != nil {
 			return errMsg{err}
 		}

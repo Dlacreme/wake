@@ -48,26 +48,30 @@ func ValidateRef(root, ref string) error {
 	return nil
 }
 
-// ChangedItems returns the normalised changed-file list, recency-sorted,
+// ChangedItems returns the normalised changed-file list, sorted per cfg,
 // with exclude globs applied. since may be empty (vs HEAD).
-func ChangedItems(root, since string, exclude []string) ([]Item, error) {
+func ChangedItems(root, since string, exclude []string, sortOrder string) ([]Item, error) {
 	raw, err := rawLines(root, since)
 	if err != nil {
 		return nil, err
 	}
 	items := normalise(raw, since)
 	items = applyExclude(items, exclude)
-	items = sortByMtime(root, items)
+	if sortOrder == "mtime" {
+		items = sortByMtime(root, items)
+	} else {
+		items = sortByName(items)
+	}
 	return items, nil
 }
 
 // GrepItems runs ripgrep (or grep) restricted to the changed-file set.
 // Returns G-status items.
-func GrepItems(root, since, query string, exclude []string) ([]Item, error) {
+func GrepItems(root, since, query string, exclude []string, sortOrder string) ([]Item, error) {
 	if query == "" {
 		return nil, nil
 	}
-	all, err := ChangedItems(root, since, exclude)
+	all, err := ChangedItems(root, since, exclude, sortOrder)
 	if err != nil {
 		return nil, err
 	}
@@ -281,6 +285,16 @@ func applyExclude(items []Item, globs []string) []Item {
 	}
 	return out
 }
+
+func sortByName(items []Item) []Item {
+	out := make([]Item, len(items))
+	copy(out, items)
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].Path < out[j].Path
+	})
+	return out
+}
+
 
 type itemWithMtime struct {
 	item  Item

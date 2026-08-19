@@ -80,6 +80,7 @@ Project config takes precedence over user config. CLI flags take precedence over
 editor         = "nvim"
 preview        = "diff"       # "diff" or "full" — default view mode
 preview_width  = 62           # preview pane width, percent
+sort           = "alpha"      # "alpha" or "mtime"
 exclude        = ["*.lock", "dist/**", "*.snap"]
 ```
 
@@ -92,7 +93,7 @@ All keys and their defaults:
 | `since` | — | Default base ref (same as `--since`) |
 | `preview` | `diff` | Default preview mode |
 | `preview_width` | `62` | Preview pane width (percent) |
-| `sort` | `mtime` | List sort order |
+| `sort` | `alpha` | `alpha` or `mtime` (most recently modified first) |
 | `exclude` | — | Glob patterns to hide from the list |
 
 ## Editor setup

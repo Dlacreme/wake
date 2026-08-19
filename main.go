@@ -64,7 +64,7 @@ func main() {
 	}
 
 	// fast-path: nothing changed?
-	items, err := git.ChangedItems(root, since, cfg.Exclude)
+	items, err := git.ChangedItems(root, since, cfg.Exclude, cfg.Sort)
 	if err != nil {
 		die(err.Error())
 	}

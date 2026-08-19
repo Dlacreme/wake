@@ -118,7 +118,7 @@ editor_line_fmt = ""          # e.g. "--goto {file}:{line}"
 since          = ""           # default base ref
 preview        = "diff"       # "diff" | "full"
 preview_width  = 62           # percent
-sort           = "mtime"
+sort           = "alpha"      # "alpha" or "mtime"
 exclude        = ["*.lock", "dist/**", "*.snap"]
 ```
 
